@@ -73,14 +73,13 @@ static const struct ggml_quant_caps quant_caps_table[GGML_TYPE_COUNT] = {
     },
     [GGML_TYPE_STQ1_0] = {
         .weight_capable  = true,
-    [GGML_TYPE_TEQUILA] = {
-        .weight_capable  = true,
-        .needs_imatrix   = true,
         .cpu_fallback_ok = true,
     },
+    [GGML_TYPE_TEQUILA] = {
+        .weight_capable  = true,
+        .cpu_fallback_ok = true,
     },
 };
-
 const struct ggml_quant_caps * ggml_get_quant_caps(enum ggml_type type) {
     GGML_ASSERT(type >= 0 && type < GGML_TYPE_COUNT);
     return &quant_caps_table[type];
