@@ -207,6 +207,13 @@ add_library(ggml-base
             ggml-quants.c
             ggml-quants.h
             ggml-turbo-quant.c
+            ggml-planar-quant.c
+            ggml-planar4-quant.c
+            ggml-iso-quant.c
+            ggml-iso4-quant.c
+            ggml-tequila-quant.c
+            ggml-backend-quant.c
+            ggml-quant-caps.c
             gguf.cpp)
 
 set_target_properties(ggml-base PROPERTIES
@@ -480,6 +487,7 @@ ggml_add_backend(OpenCL)
 ggml_add_backend(Hexagon)
 ggml_add_backend(ZenDNN)
 ggml_add_backend(OPENVINO)
+ggml_add_backend(HYBRID)
 
 foreach (target ggml-base ggml)
     target_include_directories(${target} PUBLIC    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include> $<INSTALL_INTERFACE:include>)
