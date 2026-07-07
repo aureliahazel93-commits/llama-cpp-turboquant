@@ -10,7 +10,7 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
-#include "llama.h"
+#include "ggml-backend-quant.h"
 
 #include <cinttypes>
 #include <cmath>
@@ -3518,11 +3518,43 @@ llama_context * llama_init_from_model(
         }
     }
 
+
+    // CPU fallback detection — warn if quant type has no GPU kernel
+    {
+        bool k_supported = false;
+        bool v_supported = false;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) continue;
+            if (ggml_backend_supports_quant(dev, params.type_k)) k_supported = true;
+            if (ggml_backend_supports_quant(dev, params.type_v)) v_supported = true;
+        }
+        const auto * kcaps = ggml_get_quant_caps(params.type_k);
+        const auto * vcaps = ggml_get_quant_caps(params.type_v);
+        if (ggml_is_quantized(params.type_k) && !k_supported && ggml_backend_dev_count() > 1) {
+            if (kcaps->cpu_fallback_ok) {
+                LLAMA_LOG_WARN("%s: type_k = %s uses CPU fallback (no GPU kernel on active backend)\n",
+                    __func__, ggml_type_name(params.type_k));
+            } else {
+                LLAMA_LOG_ERROR("%s: type_k = %s not supported on this backend and CPU fallback disabled\n",
+                    __func__, ggml_type_name(params.type_k));
+                return nullptr;
+            }
+        }
+        if (ggml_is_quantized(params.type_v) && !v_supported && ggml_backend_dev_count() > 1) {
+            if (vcaps->cpu_fallback_ok) {
+                LLAMA_LOG_WARN("%s: type_v = %s uses CPU fallback (no GPU kernel on active backend)\n",
+                    __func__, ggml_type_name(params.type_v));
+            } else {
+                LLAMA_LOG_ERROR("%s: type_v = %s not supported on this backend and CPU fallback disabled\n",
+                    __func__, ggml_type_name(params.type_v));
+                return nullptr;
+            }
+        }
+    }
     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_k)) {
         const uint32_t blck_size = ggml_blck_size(params.type_k);
-        const bool k_is_turbo = (params.type_k == GGML_TYPE_TURBO2_0 ||
-                                 params.type_k == GGML_TYPE_TURBO3_0 ||
-                                 params.type_k == GGML_TYPE_TURBO4_0);
+        const bool k_is_turbo = ggml_type_needs_wht(params.type_k);
         for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
             uint32_t head_k = model->hparams.n_embd_head_k(il);
             // Turbo types zero-pad heads to next multiple of 128 in llama-kv-cache.cpp
@@ -3539,9 +3571,7 @@ llama_context * llama_init_from_model(
 
     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_v)) {
         const uint32_t blck_size = ggml_blck_size(params.type_v);
-        const bool v_is_turbo = (params.type_v == GGML_TYPE_TURBO2_0 ||
-                                 params.type_v == GGML_TYPE_TURBO3_0 ||
-                                 params.type_v == GGML_TYPE_TURBO4_0);
+        const bool v_is_turbo = ggml_type_needs_wht(params.type_v);
         const bool is_mla = model->hparams.is_mla();
         for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
             uint32_t head_v = model->hparams.n_embd_head_v(il);
@@ -3559,8 +3589,7 @@ llama_context * llama_init_from_model(
 
     // TurboQuant cache types require flash attention — auto-enable if disabled
     if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED &&
-        (params.type_k == GGML_TYPE_TURBO2_0 || params.type_k == GGML_TYPE_TURBO3_0 || params.type_k == GGML_TYPE_TURBO4_0 ||
-         params.type_v == GGML_TYPE_TURBO2_0 || params.type_v == GGML_TYPE_TURBO3_0 || params.type_v == GGML_TYPE_TURBO4_0)) {
+        (ggml_type_needs_wht(params.type_k) || ggml_type_is_turbo_family(params.type_v))) {
         LLAMA_LOG_WARN("%s: turbo cache types require flash_attn — enabling automatically\n", __func__);
         params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     }
@@ -4156,3 +4185,45 @@ llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * c
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {
     return ctx->get_cparams().ctx_other;
 }
+
+//
+// Hidden state API (HRM drafter/assistant transfer)
+//
+
+struct llama_hidden_state * llama_get_hidden_state(struct llama_context * ctx) {
+    if (ctx == nullptr) {
+        return nullptr;
+    }
+
+    const struct llama_model * model = llama_get_model(ctx);
+
+    auto * state = new llama_hidden_state;
+
+    state->n_embd   = llama_model_n_embd(model);
+    state->n_layer  = llama_model_n_layer(model);
+
+    float * embd = ctx->get_embeddings();
+    state->data = embd;
+    state->n_tokens = embd != nullptr ? 1 : 0;
+
+    return state;
+}
+
+int32_t llama_feed_hidden_state(
+        struct llama_context           * ctx_drafter,
+        const struct llama_hidden_state * state,
+        int32_t                         n_tokens) {
+    if (ctx_drafter == nullptr || state == nullptr || state->data == nullptr) {
+        return -1;
+    }
+
+    // Prepare a batch using the hidden state as input embeddings
+    // This requires the drafter to support receiving hidden states directly
+    // For now, this is a placeholder that returns the number of tokens processed
+    return n_tokens;
+}
+
+void llama_hidden_state_free(struct llama_hidden_state * state) {
+    delete state;
+}
+
