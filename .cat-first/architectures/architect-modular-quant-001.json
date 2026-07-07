@@ -1,0 +1,409 @@
+{
+  "plan_name": "modular-quant-system",
+  "source": "user_provided",
+  "base_repo": "https://github.com/TheTom/llama-cpp-turboquant",
+  "base_branch": "feature/turboquant-kv-cache",
+  "strategy": "trait-driven dispatch via separate capabilities table — zero modifications to upstream ggml.c type_traits[] array, zero modifications to upstream struct fields",
+  "conflict_model": {
+    "upstream_files_never_touched": [
+      "ggml/src/ggml.c (type_traits[] array, quantize_* switch — only append new enum + new cases)",
+      "ggml/src/ggml-quants.c (upstream quant implementations)",
+      "ggml/src/ggml-cpu/ops.cpp (CPU dispatch — already trait-driven)"
+    ],
+    "append_only_files": [
+      "ggml/include/ggml.h (add struct + API at end, add enum types at end)",
+      "ggml/src/ggml-common.h (add block structs at end)",
+      "ggml/src/ggml-quants.h (add declarations at end)",
+      "ggml/src/ggml.c (append type_traits entries + dispatch cases — never modify existing lines)",
+      "ggml/src/CMakeLists.txt (append new .c files to source list)"
+    ],
+    "one_time_refactor_files": [
+      "src/llama-kv-cache.cpp (15 hardcoded type checks → trait lookups — done ONCE, then never conflicts with upstream again)",
+      "src/llama-graph.cpp (12 hardcoded type checks → trait lookups — done ONCE, then never conflicts again)"
+    ],
+    "new_files_zero_conflict": [
+      "ggml/src/ggml-quant-caps.h (capabilities struct + accessor)",
+      "ggml/src/ggml-quant-caps.c (capabilities table + implementation)",
+      "ggml/src/ggml-planar-quant.c, ggml-iso-quant.c, etc. (quant implementations)"
+    ]
+  },
+  "builder_instructions": {
+    "overview": "Fork TheTom's feature/turboquant-kv-cache (has turbo3/4/2 KV-cache architecture). Implement a separate ggml_quant_caps capabilities table so ALL type-specific behavior in kv-cache and graph is data-driven. Then port planar/iso quants, deferred allocation, weight compression, HRM architect, hidden state API, and stability modules on top of the modular base. Adding a future quant type = 1 new .c file + 1 caps table entry + 1 type_traits entry + 1 dispatch case. Zero changes to kv-cache.cpp or graph.cpp.",
+    "files_to_create": [
+      "ggml/include/ggml-quant-caps.h",
+      "ggml/src/ggml-quant-caps.c",
+      "ggml/src/ggml-planar-quant.c",
+      "ggml/src/ggml-planar4-quant.c",
+      "ggml/src/ggml-iso-quant.c",
+      "ggml/src/ggml-iso4-quant.c"
+    ],
+    "files_to_modify": [
+      "ggml/include/ggml.h",
+      "ggml/src/ggml-common.h",
+      "ggml/src/ggml-quants.h",
+      "ggml/src/ggml.c",
+      "ggml/src/CMakeLists.txt",
+      "src/llama-kv-cache.cpp",
+      "src/llama-kv-cache.h",
+      "src/llama-graph.cpp"
+    ],
+    "phases": [
+      {
+        "phase": 0,
+        "name": "fork_and_baseline",
+        "description": "Fork TheTom's repo at feature/turboquant-kv-cache. Clone, build, verify baseline compiles before any changes.",
+        "steps": [
+          "Fork https://github.com/TheTom/llama-cpp-turboquant on GitHub",
+          "Clone the fork: git clone <your-fork-url>",
+          "Checkout branch feature/turboquant-kv-cache",
+          "Configure: cmake -B build -DGGML_CUDA=ON (or OFF for CPU-only)",
+          "Build: cmake --build build -j$(nproc)",
+          "Verify: build/bin/llama-cli --help exits 0",
+          "Record baseline: git log --oneline -1 > .baseline-commit"
+        ],
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "No new compiler errors or warnings vs baseline"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 1,
+        "name": "create_capabilities_table",
+        "description": "Create a SEPARATE capabilities struct and table. This does NOT modify the existing ggml_type_traits struct or the type_traits[] array in ggml.c. It is a parallel data structure that higher-level code (kv-cache, graph) queries instead of hardcoding type checks.",
+        "principle": "The existing ggml_type_traits has quantization function pointers (to_float, from_float_ref). The NEW ggml_quant_caps has SEMANTIC capabilities (needs_wht, needs_deferred, head_align). Higher-level code uses caps for behavioral decisions, traits for quantization operations. Never mix them.",
+        "files": {
+          "create": [
+            {
+              "path": "ggml/include/ggml-quant-caps.h",
+              "description": "Public header: caps struct definition + accessor API",
+              "content_template": "#ifndef GGML_QUANT_CAPS_H\n#define GGML_QUANT_CAPS_H\n\n#include \"ggml.h\"\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n// Semantic capabilities for quant types.\n// Queried by kv-cache, graph, and attention code instead of hardcoding type checks.\n// Default (unset) for all fields = false/0, meaning upstream types need no special handling.\nstruct ggml_quant_caps {\n    // WHT rotation family: turbo2/3/4, planar3/4, iso3/4\n    // True if this type uses Hadamard rotation infrastructure and needs head_dim alignment.\n    bool     needs_wht;\n\n    // Turbo family only: turbo2/3/4\n    // True if this type participates in turbo-specific V adaptive layer modes (5/6/7).\n    bool     turbo_family;\n\n    // Deferred allocation: planar3/4, iso3/4\n    // True if K cache should allocate as F16 during prefill, then convert to target type post-prefill.\n    bool     needs_deferred;\n\n    // Cache capabilities\n    bool     k_cache_capable;\n    bool     v_cache_capable;\n\n    // Weight quantization\n    bool     weight_capable;\n\n    // Required head_dim alignment (0 = any alignment OK, 128 = must be multiple of 128)\n    uint32_t head_align;\n};\n\n// Returns capabilities for a given type. Never returns NULL.\n// For types with no caps entry, all fields are false/0 (safe default).\nGGML_API const struct ggml_quant_caps * ggml_get_quant_caps(enum ggml_type type);\n\n// Convenience predicates (inline, header-only):\nstatic inline bool ggml_type_needs_wht(enum ggml_type type) {\n    return ggml_get_quant_caps(type)->needs_wht;\n}\n\nstatic inline bool ggml_type_needs_deferred(enum ggml_type type) {\n    return ggml_get_quant_caps(type)->needs_deferred;\n}\n\nstatic inline bool ggml_type_is_turbo_family(enum ggml_type type) {\n    return ggml_get_quant_caps(type)->turbo_family;\n}\n\nstatic inline uint32_t ggml_type_head_align(enum ggml_type type) {\n    return ggml_get_quant_caps(type)->head_align;\n}\n\n#ifdef __cplusplus\n}\n#endif\n\n#endif // GGML_QUANT_CAPS_H"
+            },
+            {
+              "path": "ggml/src/ggml-quant-caps.c",
+              "description": "Capabilities table. ONE source of truth for all type-specific behavior. Add a new quant type by appending ONE entry here.",
+              "content_template": "#include \"ggml-quant-caps.h\"\n\n// Static table indexed by ggml_type enum value.\n// Types not listed here get all-zeros (false/0) = no special capabilities.\n// This is the ONLY file you edit when adding a new quant type's behavioral flags.\nstatic const struct ggml_quant_caps quant_caps_table[GGML_TYPE_COUNT] = {\n    // === Turbo family (turbo2/3/4) ===\n    // WHT rotation, head_dim padding, turbo V adaptive modes\n    [GGML_TYPE_TURBO3_0] = {\n        .needs_wht       = true,\n        .turbo_family    = true,\n        .k_cache_capable = true,\n        .v_cache_capable = true,\n        .head_align      = 128,\n    },\n    [GGML_TYPE_TURBO4_0] = {\n        .needs_wht       = true,\n        .turbo_family    = true,\n        .k_cache_capable = true,\n        .v_cache_capable = true,\n        .head_align      = 128,\n    },\n    [GGML_TYPE_TURBO2_0] = {\n        .needs_wht       = true,\n        .turbo_family    = true,\n        .k_cache_capable = true,\n        .v_cache_capable = true,\n        .head_align      = 128,\n    },\n\n    // === PlanarQuant family (planar3/4) ===\n    // WHT rotation + deferred F16→quant allocation\n    // NOTE: add these entries AFTER porting the quant implementations in Phase 4\n    // [GGML_TYPE_PLANAR3_0] = {\n    //     .needs_wht       = true,\n    //     .turbo_family    = false,\n    //     .needs_deferred  = true,\n    //     .k_cache_capable = true,\n    //     .v_cache_capable = true,\n    //     .head_align      = 128,\n    // },\n\n    // === IsoQuant family (iso3/4) ===\n    // WHT rotation (quaternion) + deferred F16→quant allocation\n    // NOTE: add these entries AFTER porting the quant implementations in Phase 4\n    // [GGML_TYPE_ISO3_0] = { ... same as planar ... },\n};\n\nconst struct ggml_quant_caps * ggml_get_quant_caps(enum ggml_type type) {\n    GGML_ASSERT(type >= 0 && type < GGML_TYPE_COUNT);\n    return &quant_caps_table[type];\n}"
+            }
+          ],
+          "modify": [
+            {
+              "path": "ggml/src/CMakeLists.txt",
+              "instruction": "Add ggml-quant-caps.c to the GGML_CPU_SOURCES list (or equivalent variable). Append after the existing turbo quant sources. Example: add 'ggml-quant-caps.c' to the list.",
+              "search_for": "ggml-turbo-quant.c",
+              "append_after": "ggml-quant-caps.c"
+            },
+            {
+              "path": "ggml/include/ggml.h",
+              "instruction": "Add #include \"ggml-quant-caps.h\" at the end of the includes section (before the closing #ifdef/__cplusplus). This is append-only — do NOT modify any existing lines.",
+              "search_for": "// ggml threadpool",
+              "insert_before": "#include \"ggml-quant-caps.h\""
+            }
+          ]
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "The caps table compiles. No warnings about unused fields.",
+          "ggml_get_quant_caps(GGML_TYPE_F16)->needs_wht == false (upstream type, no caps)",
+          "ggml_get_quant_caps(GGML_TYPE_TURBO3_0)->needs_wht == true"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 2,
+        "name": "refactor_kv_cache_to_caps",
+        "description": "Replace ALL 15 hardcoded type checks in llama-kv-cache.cpp with ggml_quant_caps lookups. This is a ONE-TIME refactor. After this, adding new quant types requires ZERO changes to kv-cache.cpp.",
+        "principle": "Every 'if (type == TURBO3 || type == TURBO4 || ...)' becomes a caps lookup. Use the specific predicate that matches the SEMANTIC intent of each check, not just the type list.",
+        "critical_note": "Some checks look similar but have different semantics. Read the BEFORE/AFTER carefully. The variable names in the code (is_turbo, k_is_turbo, v_is_turbo) are misleading — what matters is the behavioral intent of each check.",
+        "refactor_sites": [
+          {
+            "id": "KV-1",
+            "location": "constructor, ~line 147, initial type detection",
+            "semantic": "FAMILY CHECK: does type_k use WHT rotation?",
+            "search_pattern": "const bool k_is_turbo = (type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 || type_k == GGML_TYPE_TURBO2_0);",
+            "replace_with": "const bool k_is_turbo = ggml_type_needs_wht(type_k);",
+            "note": "This is inside the constructor body. May need to add #include \"ggml-quant-caps.h\" at top of file."
+          },
+          {
+            "id": "KV-2",
+            "location": "constructor, ~line 330, Boundary V auto-enable",
+            "semantic": "SPECIFIC TYPE CHECK: only turbo2 triggers this mode",
+            "search_pattern": "if (type_v == GGML_TYPE_TURBO2_0 && hparams.n_layer() >= 8)",
+            "replace_with": "NO CHANGE — keep hardcoded. This checks a SPECIFIC type, not a family.",
+            "note": "This is a specific-type trigger, not a family check. Leave as-is."
+          },
+          {
+            "id": "KV-3",
+            "location": "constructor, ~line 336, adaptive K type detection",
+            "semantic": "FAMILY CHECK: does type_k need WHT? Used for adaptive modes 1/2 (set K+V to Q8_0)",
+            "search_pattern": "const bool is_turbo = (type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 || type_k == GGML_TYPE_TURBO2_0 || type_k == GGML_TYPE_PLANAR3_0 || type_k == GGML_TYPE_ISO3_0 || type_k == GGML_TYPE_PLANAR4_0 || type_k == GGML_TYPE_ISO4_0);",
+            "replace_with": "const bool is_turbo = ggml_type_needs_wht(type_k);",
+            "note": "In the base fork (TheTom's), this line may only have turbo3/4/2 (no planar/iso yet). That's fine — replace with the predicate anyway. When planar/iso are ported in Phase 4, their caps entry will have needs_wht=true and they'll automatically be included."
+          },
+          {
+            "id": "KV-4",
+            "location": "constructor, ~line 337, adaptive V type detection",
+            "semantic": "TURBO FAMILY ONLY: used for V adaptive modes 5/6/7 which set V to turbo4/turbo2",
+            "search_pattern": "const bool v_is_turbo = (type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0 || type_v == GGML_TYPE_TURBO2_0);",
+            "replace_with": "const bool v_is_turbo = ggml_type_is_turbo_family(type_v);",
+            "note": "This is turbo_family, NOT needs_wht. V adaptive modes set V to specific turbo types (turbo4/turbo2). Planar/iso do NOT participate."
+          },
+          {
+            "id": "KV-5",
+            "location": "constructor, ~line 373, K head_dim padding",
+            "semantic": "FAMILY CHECK: does layer_type_k need head_dim alignment?",
+            "search_pattern": "const bool k_is_turbo = (layer_type_k == GGML_TYPE_TURBO3_0 || layer_type_k == GGML_TYPE_TURBO4_0 || layer_type_k == GGML_TYPE_TURBO2_0 || layer_type_k == GGML_TYPE_PLANAR3_0 || ...);",
+            "replace_with": "const struct ggml_quant_caps * kcaps = ggml_get_quant_caps(layer_type_k);\n        const uint32_t k_head_align = kcaps->head_align;\n        if (k_head_align > 0 && n_embd_head_k % k_head_align != 0) {",
+            "note": "Replace the boolean + if-check together. The padding logic follows (padded_head_k calculation). Adjust the if-condition to use k_head_align instead of 'k_is_turbo && n_embd_head_k % 128 != 0'."
+          },
+          {
+            "id": "KV-6",
+            "location": "constructor, ~line 387, V head_dim padding",
+            "semantic": "FAMILY CHECK: does layer_type_v need head_dim alignment?",
+            "search_pattern": "const bool v_is_turbo = (layer_type_v == GGML_TYPE_TURBO3_0 || ...);",
+            "replace_with": "const struct ggml_quant_caps * vcaps = ggml_get_quant_caps(layer_type_v);\n        const uint32_t v_head_align = vcaps->head_align;\n        if (v_head_align > 0 && !is_mla && n_embd_head_v % v_head_align != 0) {",
+            "note": "Same pattern as KV-5 but for V. Note: uses needs_wht (all WHT types need padding), NOT turbo_family. In the base fork this may only list turbo types — that's fine, the predicate will match when planar/iso are ported."
+          },
+          {
+            "id": "KV-7",
+            "location": "constructor, ~line 401, deferred allocation detection",
+            "semantic": "DEFERRED CHECK: does layer_type_k need F16-during-prefill?",
+            "search_pattern": "const bool k_is_deferred = (layer_type_k == GGML_TYPE_PLANAR3_0 || ...);",
+            "replace_with": "const bool k_is_deferred = ggml_type_needs_deferred(layer_type_k);",
+            "note": "In the base fork, this code doesn't exist yet (no planar/iso). This site is created in Phase 5 when porting deferred allocation. Listed here for completeness."
+          },
+          {
+            "id": "KV-8",
+            "location": "constructor, ~line 445, rotation matrix creation",
+            "semantic": "FAMILY CHECK: does type_k need WHT rotation matrices?",
+            "search_pattern": "if (turbo_rotation == nullptr &&\\n            \\(type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 || type_k == GGML_TYPE_TURBO2_0\\))",
+            "replace_with": "if (turbo_rotation == nullptr && ggml_type_needs_wht(type_k))",
+            "note": "The rotation matrices (turbo_rotation, turbo_rotation_inv, turbo_innerq_scale_inv) are shared across ALL WHT-family types. Using needs_wht means planar/iso automatically get them."
+          },
+          {
+            "id": "KV-9-through-12",
+            "location": "set_input functions, ~lines 1518, 1552, 1592, 1645",
+            "semantic": "FAMILY CHECK: does the RUNTIME tensor type need WHT handling?",
+            "pattern": "There are 4 functions, each with a pattern like:\n  const bool k_is_turbo = (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0);\n  const bool v_is_turbo = (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0);",
+            "replace_with": "Replace each:\n  const bool k_is_turbo = ggml_type_needs_wht(k->type);\n  const bool v_is_turbo = ggml_type_needs_wht(v->type);",
+            "note": "These check the ACTUAL tensor type at runtime (after deferred conversion, the tensor type is the quant type). Using needs_wht handles all WHT-family types uniformly."
+          }
+        ],
+        "files": {
+          "modify": [
+            {
+              "path": "src/llama-kv-cache.cpp",
+              "instruction": "Add #include \"ggml-quant-caps.h\" at the top of the file (after existing ggml includes). Then apply all refactor sites KV-1 through KV-12. Search for each search_pattern and replace with replace_with. For sites marked 'NO CHANGE', skip them.",
+              "include_to_add": "#include \"ggml-quant-caps.h\""
+            }
+          ]
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "grep -c 'GGML_TYPE_TURBO3_0.*GGML_TYPE_TURBO4_0.*GGML_TYPE_TURBO2_0' src/llama-kv-cache.cpp returns 0 (all family checks replaced)",
+          "grep -c 'ggml_type_needs_wht\\|ggml_type_is_turbo_family\\|ggml_type_needs_deferred\\|ggml_get_quant_caps' src/llama-kv-cache.cpp returns >= 10 (predicates in use)",
+          "The ONLY remaining hardcoded type checks in kv-cache.cpp should be: KV-2 (type_v == TURBO2_0 Boundary V trigger), and the adaptive mode assignments (layer_type_v = GGML_TYPE_TURBO4_0 etc. — these SET types, not CHECK them)"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 3,
+        "name": "refactor_graph_to_caps",
+        "description": "Replace ALL 12 hardcoded type checks in llama-graph.cpp with caps lookups. Same one-time refactor principle.",
+        "principle": "All 12 sites in graph.cpp check for turbo3/4/2 only (NOT planar/iso). These are turbo-family-specific attention/rotation operations. Use turbo_family predicate to match current behavior exactly. When planar/iso attention support is added later, add a separate registration — do NOT blanket-enable them here.",
+        "refactor_sites": [
+          {
+            "id": "GR-1-and-2",
+            "location": "set_input_k_rot ~line 1089, set_input_v_rot ~line 1125",
+            "pattern": "if (w->type == GGML_TYPE_TURBO2_0 || w->type == GGML_TYPE_TURBO3_0 || w->type == GGML_TYPE_TURBO4_0) {",
+            "replace_with": "if (ggml_type_is_turbo_family(w->type)) {",
+            "note": "Both functions have identical pattern. Replace both."
+          },
+          {
+            "id": "GR-3-through-6",
+            "location": "attention building, ~lines 2117-2119 and 2195-2197",
+            "pattern": "if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0) {\n    const bool k_is_turbo = (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0);",
+            "replace_with": "if (ggml_type_is_turbo_family(v->type)) {\n    const bool k_is_turbo = ggml_type_is_turbo_family(k->type);",
+            "note": "Two identical blocks (lines 2117-2119 and 2195-2197). Replace both."
+          },
+          {
+            "id": "GR-7-through-12",
+            "location": "kv-copy/rotation, ~lines 2391, 2408, 2520, 2536, 2718, 2733",
+            "pattern": "Six individual checks, each:\n  if (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0) {\n  or\n  if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0) {",
+            "replace_with": "  if (ggml_type_is_turbo_family(k->type)) {\n  or\n  if (ggml_type_is_turbo_family(v->type)) {",
+            "note": "Replace all 6 individually. Some check k->type, some check v->type. Match the variable in the replacement."
+          }
+        ],
+        "files": {
+          "modify": [
+            {
+              "path": "src/llama-graph.cpp",
+              "instruction": "Add #include \"ggml-quant-caps.h\" at the top. Apply all refactor sites GR-1 through GR-12.",
+              "include_to_add": "#include \"ggml-quant-caps.h\""
+            }
+          ]
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "grep -c 'GGML_TYPE_TURBO3_0.*GGML_TYPE_TURBO4_0.*GGML_TYPE_TURBO2_0' src/llama-graph.cpp returns 0",
+          "grep -c 'ggml_type_is_turbo_family' src/llama-graph.cpp returns >= 12",
+          "Run: build/bin/llama-cli -m <test-model> -p 'Hello' -n 10 — verify output is coherent (no crash, no garbage)"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 4,
+        "name": "port_planar_iso_quants",
+        "description": "Port the PlanarQuant (planar3/4) and IsoQuant (iso3/4) implementations from the source repo. This adds 4 new quant types. Thanks to the modular caps system, NO changes to kv-cache.cpp or graph.cpp are needed — just the quant files, traits entries, and caps entries.",
+        "steps_in_order": [
+          "1. Add 4 enum values to ggml.h: GGML_TYPE_PLANAR3_0, GGML_TYPE_ISO3_0, GGML_TYPE_PLANAR4_0, GGML_TYPE_ISO4_0 (append before GGML_TYPE_COUNT, increment GGML_TYPE_COUNT)",
+          "2. Add block structs to ggml-common.h: block_planar3_0, block_iso3_0, block_planar4_0, block_iso4_0 + QK_PLANAR3, QK_ISO3, QK_PLANAR4, QK_ISO4 constants (append at end)",
+          "3. Copy quant implementation files: ggml-planar-quant.c, ggml-planar4-quant.c, ggml-iso-quant.c, ggml-iso4-quant.c into ggml/src/",
+          "4. Add function declarations to ggml-quants.h: quantize_row_planar3_0_ref, dequantize_row_planar3_0, quantize_planar3_0, etc. (append at end)",
+          "5. Add 4 type_traits[] entries to ggml.c (append in the array, after turbo entries, before GGML_TYPE_COUNT sentinel): each with .type_name, .blck_size, .type_size, .is_quantized=true, .to_float, .from_float_ref",
+          "6. Add 4 quantize_* dispatch cases to ggml.c's quantize switch (append before the F16 case): case GGML_TYPE_PLANAR3_0: result = quantize_planar3_0(...); break; etc.",
+          "7. Add 4 entries to the caps table in ggml-quant-caps.c (uncomment the planar/iso entries): each with .needs_wht=true, .needs_deferred=true, .k_cache_capable=true, .v_cache_capable=true, .head_align=128",
+          "8. Add the 4 new .c files to ggml/src/CMakeLists.txt"
+        ],
+        "caps_entries_to_add": {
+          "GGML_TYPE_PLANAR3_0": { "needs_wht": true, "turbo_family": false, "needs_deferred": true, "k_cache_capable": true, "v_cache_capable": true, "head_align": 128 },
+          "GGML_TYPE_ISO3_0":    { "needs_wht": true, "turbo_family": false, "needs_deferred": true, "k_cache_capable": true, "v_cache_capable": true, "head_align": 128 },
+          "GGML_TYPE_PLANAR4_0": { "needs_wht": true, "turbo_family": false, "needs_deferred": true, "k_cache_capable": true, "v_cache_capable": true, "head_align": 128 },
+          "GGML_TYPE_ISO4_0":    { "needs_wht": true, "turbo_family": false, "needs_deferred": true, "k_cache_capable": true, "v_cache_capable": true, "head_align": 128 }
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "No undefined reference errors (all quant functions linked)",
+          "ggml_get_quant_caps(GGML_TYPE_PLANAR3_0)->needs_deferred == true",
+          "grep -c 'GGML_TYPE_PLANAR3_0' src/llama-kv-cache.cpp returns 0 (no hardcoded checks needed — caps-driven)"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 5,
+        "name": "port_deferred_allocation",
+        "description": "Port the deferred F16→quant K-cache allocation and convert_deferred_keys() method. This is now FULLY data-driven by caps->needs_deferred. The code lands cleanly because kv-cache.cpp was already refactored in Phase 2 to use caps.",
+        "kv_layer_struct_fields": {
+          "path": "src/llama-kv-cache.h",
+          "add_to_struct": "Add these 4 fields to the kv_layer struct (if not already present):\n    ggml_tensor * k_quant = nullptr;\n    std::vector<ggml_tensor *> k_quant_stream;\n    ggml_type target_type_k = GGML_TYPE_F16;\n    bool k_needs_convert = false;",
+          "add_declaration": "Add to the public section of llama_kv_cache class:\n    bool convert_deferred_keys();"
+        },
+        "constructor_changes": {
+          "path": "src/llama-kv-cache.cpp",
+          "allocation_block": "In the constructor, before the 'ggml_tensor * k = ...' line, insert the deferred allocation block. The key variable k_is_deferred is now obtained from caps:\n\n    const bool k_is_deferred = ggml_type_needs_deferred(layer_type_k);\n    ggml_type alloc_type_k = layer_type_k;\n    ggml_tensor * k_quant = nullptr;\n    if (k_is_deferred) {\n        alloc_type_k = GGML_TYPE_F16;\n        k_quant = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;\n        if (k_quant) ggml_format_name(k_quant, \"cache_k_quant_l%d\", il);\n    }\n    ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, alloc_type_k, n_embd_k_gqa_eff, kv_size, n_stream) : nullptr;",
+          "stream_views": "After the k_stream/v_stream loop, add:\n\n    std::vector<ggml_tensor *> k_quant_stream;\n    if (k_is_deferred && k_quant) {\n        for (uint32_t s = 0; s < n_stream; ++s) {\n            k_quant_stream.push_back(ggml_view_2d(ctx, k_quant, n_embd_k_gqa_eff, kv_size, k_quant->nb[1], s*k_quant->nb[2]));\n        }\n    }",
+          "layer_setup": "After layers.push_back({...}), add:\n\n    if (k_is_deferred && !layers.empty()) {\n        layers.back().k_quant = k_quant;\n        layers.back().k_quant_stream = k_quant_stream;\n        layers.back().target_type_k = layer_type_k;\n        layers.back().k_needs_convert = true;\n    }"
+        },
+        "convert_function": {
+          "path": "src/llama-kv-cache.cpp",
+          "description": "Append convert_deferred_keys() implementation at end of file",
+          "implementation": "See source: llama-cpp-turboquant-merged/src/llama-kv-cache.cpp lines 2858-2914. Copy verbatim. The function iterates layers, checks k_needs_convert, reads F16 → F32 → quantizes via from_float_ref → writes to k_quant → swaps tensor pointers."
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "grep -c 'k_is_deferred' src/llama-kv-cache.cpp returns >= 3 (allocation + stream views + layer setup)",
+          "grep -c 'convert_deferred_keys' src/llama-kv-cache.cpp returns >= 2 (definition + declaration match)",
+          "Functional test: load a model with -ctk planar3_0, verify prefill succeeds and convert_deferred_keys() returns true"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 6,
+        "name": "port_weight_compression",
+        "description": "Port weight compression modules. Weight quants use the same ggml_type enum and type_traits[] infrastructure, but are applied per-tensor during model loading (GGUF) rather than per-cache. They do NOT need caps entries unless they have special KV-cache behavior.",
+        "scope": "This phase is intentionally flexible. Weight compression quants (e.g., TQ3_1S, TQ4_1S, or any new weight quant) follow the same pattern as Phase 4: add enum, add block struct, add implementation .c file, add type_traits entry, add dispatch case. No kv-cache or graph changes needed.",
+        "placeholder": "Define specific weight quants to port based on requirements. Each follows the Phase 4 pattern."
+      },
+      {
+        "phase": 7,
+        "name": "port_hrm_architect_and_hidden_state",
+        "description": "Port HRM (Hierarchical Recurrent Model) architect support and hidden state API. These plug into the existing llama_memory_i interface and model implementation layer. They are independent of the quant system.",
+        "scope": "HRM features use the llama_memory_recurrent interface (already exists for Mamba/RWKV models). Hidden state extraction uses the post-output-norm hidden state (already exposed in gemma4.cpp for MTP). These modules go in src/models/ and src/llama-memory-recurrent.*, NOT in ggml/.",
+        "dependencies": "Requires the kv-cache sharing architecture (mem_other, share callback) from TheTom's branch. Verify these exist in the base fork before porting.",
+        "placeholder": "Define specific HRM modules, hidden state API endpoints, and model implementations to port based on requirements."
+      },
+      {
+        "phase": 8,
+        "name": "port_stability_modules",
+        "description": "Port stability modules (imatrix integration, perplexity monitoring, KL divergence testing). These are tooling/validation layers, not core inference path.",
+        "scope": "Goes in tools/ and common/ directories. Independent of quant system.",
+        "placeholder": "Define specific stability tools and metrics to port based on requirements."
+      }
+    ]
+  },
+  "validation_checks": [
+    {
+      "id": "build_full",
+      "command": "cmake --build build -j$(nproc)",
+      "must_exit_zero": true,
+      "after_phases": [0, 1, 2, 3, 4, 5]
+    },
+    {
+      "id": "no_hardcoded_kv_checks",
+      "command": "grep -c 'GGML_TYPE_TURBO3_0.*GGML_TYPE_TURBO4_0.*GGML_TYPE_TURBO2_0' src/llama-kv-cache.cpp",
+      "expected_output": "0",
+      "after_phases": [2],
+      "description": "All family type checks in kv-cache replaced with caps predicates"
+    },
+    {
+      "id": "no_hardcoded_graph_checks",
+      "command": "grep -c 'GGML_TYPE_TURBO3_0.*GGML_TYPE_TURBO4_0.*GGML_TYPE_TURBO2_0' src/llama-graph.cpp",
+      "expected_output": "0",
+      "after_phases": [3],
+      "description": "All family type checks in graph replaced with caps predicates"
+    },
+    {
+      "id": "caps_predicates_in_use",
+      "command": "grep -rc 'ggml_type_needs_wht\\|ggml_type_is_turbo_family\\|ggml_type_needs_deferred\\|ggml_get_quant_caps' src/ ggml/src/ggml-quant-caps.c",
+      "expected_min_total": 25,
+      "after_phases": [2, 3],
+      "description": "Caps predicates used across kv-cache + graph + caps implementation"
+    },
+    {
+      "id": "no_ggmlc_modifications",
+      "command": "git diff upstream/master -- ggml/src/ggml.c | grep '^-' | grep -v '^---' | wc -l",
+      "expected_max": 0,
+      "after_phases": [1],
+      "description": "No lines REMOVED from ggml.c type_traits[] array relative to upstream — only additions"
+    },
+    {
+      "id": "functional_turbo3",
+      "command": "build/bin/llama-cli -m <test-model.gguf> -p 'The quick brown fox' -n 16 -ctk turbo3_0 -ctv turbo3_0",
+      "must_produce_output": true,
+      "must_not_crash": true,
+      "after_phases": [2, 3],
+      "description": "Turbo3 K+V cache still works after refactoring to caps"
+    },
+    {
+      "id": "functional_planar3_deferred",
+      "command": "build/bin/llama-cli -m <test-model.gguf> -p 'The quick brown fox' -n 16 -ctk planar3_0",
+      "must_produce_output": true,
+      "must_not_crash": true,
+      "after_phases": [5],
+      "description": "Planar3 deferred K cache works end-to-end"
+    },
+    {
+      "id": "upstream_pull_test",
+      "command": "git fetch upstream && git merge upstream/master --no-commit --no-ff 2>&1 | grep -c 'CONFLICT'",
+      "expected_max_conflicts": 3,
+      "conflict_files_acceptable": ["ggml/include/ggml.h", "ggml/src/CMakeLists.txt", "ggml/src/ggml-common.h"],
+      "after_phases": [5],
+      "description": "Pulling upstream produces minimal conflicts. Acceptable: enum additions in ggml.h, CMakeLists source list, block struct additions in ggml-common.h. NOT acceptable: conflicts in llama-kv-cache.cpp, llama-graph.cpp, or ggml-quant-caps.c (those should merge cleanly)."
+    }
+  ],
+  "future_quant_addition_workflow": {
+    "description": "How to add a new quant type after the modular system is in place",
+    "steps": [
+      "1. Add enum value to ggml.h (1 line, append before GGML_TYPE_COUNT)",
+      "2. Add block struct + QK constant to ggml-common.h (append at end)",
+      "3. Create ggml/src/ggml-newtype-quant.c (implementation file)",
+      "4. Add function declarations to ggml-quants.h (append at end)",
+      "5. Add type_traits[] entry to ggml.c (append in array)",
+      "6. Add quantize dispatch case to ggml.c switch (append before F16 case)",
+      "7. Add caps entry to ggml-quant-caps.c (1 entry, set capability flags)",
+      "8. Add .c file to CMakeLists.txt (1 line)",
+      "9. If CUDA support: add kernel files + fattn registration",
+      "TOTAL CHANGES TO kv-cache.cpp: 0",
+      "TOTAL CHANGES TO graph.cpp: 0"
+    ]
+  }
+}

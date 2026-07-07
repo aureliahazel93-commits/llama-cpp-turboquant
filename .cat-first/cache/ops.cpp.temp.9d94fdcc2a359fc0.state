@@ -1,0 +1,13 @@
+FILE=/home/ethan/llama-cpp-mod/ggml/src/ggml-cpu/ops.cpp
+START=1
+END=11613
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/0b17659460894f37.1
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/ops.cpp.temp.9d94fdcc2a359fc0.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/ops.cpp.lock
+REPLACED_HASH=561f35123cc1a3f0d57bd004a12e5dbd1fd957b114ada78fe04949a5dbd69110
+FILE_INO=40:21562899
+FULL_HASH=561f35123cc1a3f0d57bd004a12e5dbd1fd957b114ada78fe04949a5dbd69110
+BASENAME=ops.cpp
+RELPATH=ggml/src/ggml-cpu/ops.cpp
+PATH_HASH=0b17659460894f37
+TITLE=pre-phase18-snapshot

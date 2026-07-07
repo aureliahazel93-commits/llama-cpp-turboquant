@@ -1,0 +1,101 @@
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_shuffle : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+// Phase 15: Vulkan Compute Shader for Q4_0 GEMM with inline dequantization
+//
+// Based on ncnn convolution_vulkan.cpp patterns:
+// - Storage buffers only (no UBOs)
+// - Push constants carry resolved strides
+// - Specialization constants for K and subgroup_size
+// - Subgroup shuffle for block-scale broadcast
+// - Subgroup reduction for dot product
+//
+// Q4_0 block layout: { fp16 d; uint qs[16]; } = 18 bytes per 32 weights
+// Dequant: w[i] = d * (q[i] - 8), where q is a 4-bit nibble
+//
+// Compute: dst[row, col] = sum_k( W[row, k] * X[col, k] )
+// W is Q4_0 quantized, X is F32 activations
+// One workgroup computes one (row, col) output element using cooperative dequant
+
+layout(local_size_x_id = 0) in;  // specialization constant: subgroup_size (32 or 64)
+
+layout(set = 0, binding = 0) readonly buffer WeightData { uint weights[]; };
+layout(set = 0, binding = 1) readonly buffer ActData   { float activations[]; };
+layout(set = 0, binding = 2) buffer OutputData         { float output[]; };
+
+// Push constants (from ncnn pattern: resolved strides, not raw dims)
+layout(push_constant) uniform PushConstants {
+    uint M;           // weight rows (output dim)
+    uint N;           // activation columns (batch dim)
+    uint K;           // embedding dim
+    uint row_offset;  // iGPU starts here (disjoint slice offset)
+    uint w_stride;    // bytes per weight row
+    uint x_stride;    // bytes per activation row (= K * 4 for F32)
+} pc;
+
+// Specialization constants
+layout(constant_id = 0) const uint SUBGROUP_SIZE = 32;
+
+// Decode a Q4_0 nibble to float
+float dequant_q4_0_element(uint byte_index, uint nibble_raw, float d) {
+    int q = int(nibble_raw) & 0x0F;
+    return d * float(q - 8);
+}
+
+void main() {
+    uint lane = gl_SubgroupInvocationID;
+    uint row = gl_WorkGroupID.x + pc.row_offset;
+    uint col = gl_WorkGroupID.y;
+
+    if (row >= pc.M || col >= pc.N) return;
+
+    const uint K = pc.K;
+    const uint nb = K / 32;  // number of Q4_0 blocks per row
+
+    // Each subgroup processes one output element (row, col)
+    // 32 lanes cooperatively process 32 weights per block
+    float total_sum = 0.0;
+
+    for (uint b = 0; b < nb; b++) {
+        // Q4_0 block: 2 bytes (fp16 d) + 16 bytes (32 nibbles packed)
+        uint block_offset = row * pc.w_stride + b * 18;
+
+        // Load scale (fp16) — broadcast to all lanes via subgroup shuffle
+        uint d_lo = uint(weights[block_offset]);
+        uint d_hi = uint(weights[block_offset + 1]);
+        float d = unpackHalf2x16(d_lo | (d_hi << 16)).x;
+        d = subgroupShuffle(d, 0);  // lane 0 broadcasts to all
+
+        // Each lane loads its nibble from the 16-byte qs array
+        // 32 nibbles packed into 16 bytes: lane i → byte i/2, nibble (i%2)*4
+        uint byte_idx = lane / 2;
+        uint qs_word = weights[block_offset + 2 + (byte_idx / 4)];
+        uint qs_bp   = (byte_idx % 4) * 8;
+        uint8_t raw  = uint8_t((qs_word >> qs_bp) & 0xFF);
+        uint shift   = (lane % 2) * 4;
+        uint nibble  = (uint(raw) >> shift) & 0x0F;
+
+        float w = d * float(int(nibble) - 8);
+
+        // Load activation for this lane's k position
+        float x = activations[col * pc.K + b * 32 + lane];
+
+        // Per-lane product
+        float partial = w * x;
+
+        // Subgroup reduction: sum across all 32 lanes
+        partial = subgroupAdd(partial);
+
+        // Lane 0 accumulates across blocks
+        if (lane == 0) {
+            total_sum += partial;
+        }
+    }
+
+    // Lane 0 writes the final result
+    if (lane == 0) {
+        output[row * pc.N + col] = total_sum;
+    }
+}

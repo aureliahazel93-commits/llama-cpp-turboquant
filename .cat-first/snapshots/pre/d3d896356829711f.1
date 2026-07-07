@@ -1,0 +1,59 @@
+#include "ggml-hybrid.h"
+#include "ggml-backend-impl.h"
+#include "ggml-quant-caps.h"
+#include <cstring>
+
+static struct {
+    bool initialized;
+    bool uma_capable;
+    struct ggml_hybrid_thermal_state thermal;
+} hybrid_g_state = {false, false, {0.0f, 0.0f, 0.0f, 0.0f, 0.5f}};
+
+static const char * hybrid_get_name(ggml_backend_t backend) {
+    (void)backend;
+    return "Hybrid-CPU+iGPU";
+}
+
+static void hybrid_free(ggml_backend_t backend) {
+    hybrid_g_state.initialized = false;
+    delete (ggml_backend *)backend;
+}
+
+static enum ggml_status hybrid_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+    (void)backend;
+    (void)cgraph;
+    return GGML_STATUS_SUCCESS;
+}
+
+static bool hybrid_supports_op(ggml_backend_t backend, const struct ggml_tensor * tensor) {
+    (void)backend;
+    (void)tensor;
+    return true;
+}
+
+ggml_backend_t ggml_backend_hybrid_init(void) {
+    hybrid_g_state.initialized = true;
+    hybrid_g_state.uma_capable = false;
+
+    ggml_backend * backend = new ggml_backend;
+    backend->guid = ggml_guid_zero();
+    backend->iface.get_name = hybrid_get_name;
+    backend->iface.free = hybrid_free;
+    backend->iface.graph_compute = hybrid_graph_compute;
+    backend->device = nullptr;
+    backend->context = nullptr;
+
+    return backend;
+}
+
+ggml_backend_buffer_type_t ggml_backend_hybrid_buffer_type(void) {
+    return nullptr;
+}
+
+bool ggml_backend_hybrid_is_uma(void) {
+    return hybrid_g_state.uma_capable;
+}
+
+struct ggml_hybrid_thermal_state ggml_hybrid_get_thermal(void) {
+    return hybrid_g_state.thermal;
+}

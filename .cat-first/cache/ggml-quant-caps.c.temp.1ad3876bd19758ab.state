@@ -1,0 +1,13 @@
+FILE=/home/ethan/llama-cpp-mod/ggml/src/ggml-quant-caps.c
+START=1
+END=79
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/cd3ac1026cbe5353.9
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/ggml-quant-caps.c.temp.1ad3876bd19758ab.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/ggml-quant-caps.c.lock
+REPLACED_HASH=8320edc7e6adedac5910bd0a6bede56dd12ba0597cd9168f46fadb65217841e6
+FILE_INO=40:21623729
+FULL_HASH=8320edc7e6adedac5910bd0a6bede56dd12ba0597cd9168f46fadb65217841e6
+BASENAME=ggml-quant-caps.c
+RELPATH=ggml/src/ggml-quant-caps.c
+PATH_HASH=cd3ac1026cbe5353
+TITLE=pre-phase18-snapshot

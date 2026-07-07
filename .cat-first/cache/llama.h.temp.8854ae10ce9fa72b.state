@@ -1,0 +1,13 @@
+FILE=/home/ethan/llama-cpp-mod/include/llama.h
+START=1
+END=1604
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/dd7c3bc82b7d2728.1
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/llama.h.temp.8854ae10ce9fa72b.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/llama.h.lock
+REPLACED_HASH=20c8bcd175d15745f3dcecb466cc7829e2bc1208f95c9dbb21ede329aa127dda
+FILE_INO=40:21564019
+FULL_HASH=20c8bcd175d15745f3dcecb466cc7829e2bc1208f95c9dbb21ede329aa127dda
+BASENAME=llama.h
+RELPATH=include/llama.h
+PATH_HASH=dd7c3bc82b7d2728
+TITLE=pre-phase18-snapshot

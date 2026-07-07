@@ -1,0 +1,16 @@
+FILE=/home/ethan/llama-cpp-mod/ggml/include/ggml.h
+START=441
+END=442
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/7dea3e94fe52f756.18
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/ggml.h.temp.b2a6a19a2f3cff91.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/ggml.h.lock
+REPLACED_HASH=748a0180b46dd0f9e3c142257bf0414bdee49e75e6f275771ff01dde80f10f6c
+FILE_INO=40:21611939
+FULL_HASH=4db9acbfe055c5d2009b56bd3286385c50cc0851a9244dca9928cb4df5367e72
+BASENAME=ggml.h
+RELPATH=ggml/include/ggml.h
+PATH_HASH=7dea3e94fe52f756
+TITLE=add-stq1_0-enum
+        GGML_TYPE_ISO4_0    = 50, // IsoQuant 4-bit KV cache: quaternion 4D rotation + 3-bit scalar + 1-bit QJL
+        GGML_TYPE_STQ1_0   = 51, // AngelSlim STQ: 1.31 bpw structured ternary, 32-entry codebook
+        GGML_TYPE_COUNT     = 52,

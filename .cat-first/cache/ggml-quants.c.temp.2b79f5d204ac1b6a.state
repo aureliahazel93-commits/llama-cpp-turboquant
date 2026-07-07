@@ -1,0 +1,13 @@
+FILE=/home/ethan/llama-cpp-mod/ggml/src/ggml-quants.c
+START=1
+END=5599
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/fa2f6a50994f8309.1
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/ggml-quants.c.temp.2b79f5d204ac1b6a.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/ggml-quants.c.lock
+REPLACED_HASH=1d98300a85048878d7a9f92d8892420fb6d9dfec6f12309c691f48c4a93fd316
+FILE_INO=40:21563531
+FULL_HASH=1d98300a85048878d7a9f92d8892420fb6d9dfec6f12309c691f48c4a93fd316
+BASENAME=ggml-quants.c
+RELPATH=ggml/src/ggml-quants.c
+PATH_HASH=fa2f6a50994f8309
+TITLE=pre-phase18-snapshot

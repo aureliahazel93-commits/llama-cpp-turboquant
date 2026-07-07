@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Hardware prober for llama.cpp builds.
+
+Reads llama_prober_config.json, runs probe commands in priority order,
+and outputs CMake flags for detected hardware backends.
+
+Usage:
+    python3 llama_prober.py [--json] [--config PATH]
+
+Output (default):
+    -DGGML_FLAG1=ON -DGGML_FLAG2=ON ...
+
+Output (--json):
+    JSON object with probe results + cmake_flags.
+"""
+import argparse
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def load_config(path: str = "llama_prober_config.json") -> dict:
+    with open(path) as f:
+        return json.load(f)
+
+
+def probe_command(cmd: str, timeout: int = 5) -> tuple[bool, str]:
+    """Run a probe command. Returns (success, output)."""
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=timeout
+        )
+        return result.returncode == 0, result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False, ""
+
+
+def check_os(probe: dict) -> bool:
+    os_name = platform.system()
+    supported = probe.get("os_support", [])
+    if not supported:
+        return True
+    return os_name in supported
+
+
+def detect_backends(config: dict) -> dict:
+    probes = config.get("probes", [])
+    results = {}
+    cmake_flags = []
+
+    for probe in sorted(probes, key=lambda p: p.get("priority", 99)):
+        backend = probe["backend"]
+        if not check_os(probe):
+            results[backend] = {"detected": False, "reason": "os_not_supported"}
+            continue
+
+        detected = False
+        probe_output = ""
+        for cmd in probe.get("probe_commands", []):
+            ok, out = probe_command(cmd)
+            if ok:
+                detected = True
+                probe_output = out
+                break
+
+        if detected and probe.get("sdk_commands"):
+            sdk_ok = False
+            for sdk_cmd in probe["sdk_commands"]:
+                ok, _ = probe_command(sdk_cmd)
+                if ok:
+                    sdk_ok = True
+                    break
+            if not sdk_ok:
+                warning = probe.get("sdk_missing_warning", f"{backend}: SDK not found")
+                print(f"WARN: {warning}", file=sys.stderr)
+                detected = False
+                results[backend]["detected"] = False
+                results[backend]["reason"] = "sdk_not_found"
+                continue
+
+        results[backend] = {
+            "detected": detected,
+            "probe_output": probe_output[:200] if probe_output else "",
+        }
+
+        if detected:
+            for flag in probe.get("cmake_flags", []):
+                cmake_flags.append(flag)
+
+    # CPU fallbacks (always available)
+    for fallback in config.get("cpu_fallbacks", []):
+        backend = fallback["backend"]
+        results[backend] = {"detected": True, "reason": "cpu_always_available"}
+        for flag in fallback.get("cmake_flags", []):
+            cmake_flags.append(flag)
+
+    return results, cmake_flags
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Probe hardware for llama.cpp build")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    parser.add_argument("--config", default="llama_prober_config.json", help="Path to config")
+    args = parser.parse_args()
+
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = Path(__file__).parent / args.config
+
+    config = load_config(str(config_path))
+    results, cmake_flags = detect_backends(config)
+
+    if args.json:
+        output = {"probes": results, "cmake_flags": cmake_flags}
+        print(json.dumps(output, indent=2))
+    else:
+        if cmake_flags:
+            print(" ".join(f"{f}" for f in cmake_flags))
+        else:
+            print("-DGGML_CPU=ON")
+
+
+if __name__ == "__main__":
+    main()

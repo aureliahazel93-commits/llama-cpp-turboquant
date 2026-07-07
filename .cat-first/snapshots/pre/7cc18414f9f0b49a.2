@@ -1,0 +1,77 @@
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_shuffle : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+
+// Phase 15: Vulkan Compute Shader for Q8_0 GEMM with inline dequantization
+//
+// Q8_0 block layout: { fp16 d; int8_t qs[32]; } = 34 bytes per 32 weights
+// Dequant: w = d * qs[i]  (signed 8-bit, no centering needed unlike Q4_0)
+//
+// Q8_0 is the simplest high-quality quant type — int8 symmetric with fp16 scale.
+// The subgroup dequant is straightforward: each lane loads one int8 weight,
+// multiplies by the broadcast scale, and multiplies with the activation.
+// The subgroupAdd reduction gives the dot product for the block.
+
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly buffer WeightData { uint8_t weights[]; };
+layout(set = 0, binding = 1) readonly buffer ActData   { float activations[]; };
+layout(set = 0, binding = 2) buffer OutputData         { float output[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint row_offset;
+    uint w_stride;
+} pc;
+
+layout(constant_id = 0) const uint SUBGROUP_SIZE = 32;
+
+void main() {
+    uint lane = gl_SubgroupInvocationID;
+    uint row = gl_WorkGroupID.x + pc.row_offset;
+    uint col = gl_WorkGroupID.y;
+
+    if (row >= pc.M || col >= pc.N) return;
+
+    const uint K = pc.K;
+    const uint nb = K / 32;  // Q8_0 blocks per row
+
+    float total_sum = 0.0;
+
+    for (uint b = 0; b < nb; b++) {
+        // Q8_0 block: 2 bytes (fp16 d) + 32 bytes (int8 qs)
+        uint block_offset = row * pc.w_stride + b * 34;
+
+        // Load and broadcast scale via subgroup shuffle
+        uint d_bits = uint(weights[block_offset]) | (uint(weights[block_offset + 1]) << 8);
+        float d = unpackHalf2x16(d_bits).x;
+        d = subgroupShuffle(d, 0);
+
+        // Each lane loads one int8 weight from qs[lane]
+        int q = int(weights[block_offset + 2 + lane]) - 128;  // signed interpretation
+        // Note: Q8_0 stores as uint8_t but interprets as int8_t.
+        // In GLSL, uint8_t loads as 0..255. Convert to signed: q - 256 if q > 127.
+        if (q > 127) q -= 256;
+        // Actually Q8_0 qs are already signed int8 reinterpreted.
+        // The dequant is: w = d * float(int8_t(qs[i]))
+        // Since we loaded as uint8, convert:
+        int8_t qs_val = int8_t(weights[block_offset + 2 + lane]);
+        float w = d * float(qs_val);
+
+        // Load activation for this lane's k position
+        float x = activations[col * K + b * 32 + lane];
+
+        // Per-lane product and subgroup reduction
+        float partial = w * x;
+        partial = subgroupAdd(partial);
+
+        if (lane == 0) total_sum += partial;
+    }
+
+    if (lane == 0) {
+        output[row * pc.N + col] = total_sum;
+    }
+}

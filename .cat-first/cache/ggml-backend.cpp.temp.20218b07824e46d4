@@ -1,0 +1,5 @@
+#endif
+
+#ifndef GGML_SCHED_MAX_PREFETCH_SLOTS
+#define GGML_SCHED_MAX_PREFETCH_SLOTS 8
+#endif

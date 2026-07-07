@@ -1,0 +1,13 @@
+FILE=/home/ethan/llama-cpp-mod/ggml/include/ggml.h
+START=1
+END=2888
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/7dea3e94fe52f756.17
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/ggml.h.temp.883110dd68cf9c58.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/ggml.h.lock
+REPLACED_HASH=4db9acbfe055c5d2009b56bd3286385c50cc0851a9244dca9928cb4df5367e72
+FILE_INO=40:21611939
+FULL_HASH=4db9acbfe055c5d2009b56bd3286385c50cc0851a9244dca9928cb4df5367e72
+BASENAME=ggml.h
+RELPATH=ggml/include/ggml.h
+PATH_HASH=7dea3e94fe52f756
+TITLE=pre-phase18-snapshot

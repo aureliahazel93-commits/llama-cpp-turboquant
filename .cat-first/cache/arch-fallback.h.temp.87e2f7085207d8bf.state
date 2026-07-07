@@ -1,0 +1,13 @@
+FILE=/home/ethan/llama-cpp-mod/ggml/src/ggml-cpu/arch-fallback.h
+START=1
+END=348
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/eb83d4005a392e2e.1
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/arch-fallback.h.temp.87e2f7085207d8bf.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/arch-fallback.h.lock
+REPLACED_HASH=2ac9cfb4222bfaf05346e619a87b9c6e12c743086679a5d618a4e8d5df583be3
+FILE_INO=40:21562856
+FULL_HASH=2ac9cfb4222bfaf05346e619a87b9c6e12c743086679a5d618a4e8d5df583be3
+BASENAME=arch-fallback.h
+RELPATH=ggml/src/ggml-cpu/arch-fallback.h
+PATH_HASH=eb83d4005a392e2e
+TITLE=pre-phase18-snapshot

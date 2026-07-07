@@ -1,0 +1,13 @@
+FILE=/home/ethan/llama-cpp-mod/tools/quantize/quantize.cpp
+START=1
+END=656
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/f982714f22699237.1
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/quantize.cpp.temp.1e131385faaf4768.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/quantize.cpp.lock
+REPLACED_HASH=b82f0618ef572c88bfa90a745015afeccd73ba6b0a0f1c939e0cbcc2820f966f
+FILE_INO=40:21564670
+FULL_HASH=b82f0618ef572c88bfa90a745015afeccd73ba6b0a0f1c939e0cbcc2820f966f
+BASENAME=quantize.cpp
+RELPATH=tools/quantize/quantize.cpp
+PATH_HASH=f982714f22699237
+TITLE=pre-phase18-snapshot

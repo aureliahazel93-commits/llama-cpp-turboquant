@@ -1,0 +1,13 @@
+FILE=/home/ethan/llama-cpp-mod/src/llama-quant.cpp
+START=1
+END=1409
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/bcc71d02e0337319.1
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/llama-quant.cpp.temp.b57aed5a6a16d415.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/llama-quant.cpp.lock
+REPLACED_HASH=12414531402e2dcf0b53a01ba50942c04ad6ae32759047d0175e2ebdf1964aea
+FILE_INO=40:21564303
+FULL_HASH=12414531402e2dcf0b53a01ba50942c04ad6ae32759047d0175e2ebdf1964aea
+BASENAME=llama-quant.cpp
+RELPATH=src/llama-quant.cpp
+PATH_HASH=bcc71d02e0337319
+TITLE=pre-phase18-snapshot

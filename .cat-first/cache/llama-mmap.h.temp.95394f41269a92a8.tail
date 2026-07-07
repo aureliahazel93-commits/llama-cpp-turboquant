@@ -1,0 +1,16 @@
+
+struct llama_mlock {
+    llama_mlock();
+    ~llama_mlock();
+
+    void init(void * ptr);
+    void grow_to(size_t target_size);
+
+    static const bool SUPPORTED;
+
+private:
+    struct impl;
+    std::unique_ptr<impl> pimpl;
+};
+
+size_t llama_path_max();

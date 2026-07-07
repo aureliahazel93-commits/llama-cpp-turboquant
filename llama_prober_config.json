@@ -1,0 +1,166 @@
+{
+  "project": "llama.cpp",
+  "repository": "https://github.com/ggml-org/llama.cpp",
+  "build_system": "cmake",
+  "description": "Hardware probe and backend mapping configuration for automated llama.cpp builds.",
+  "probes": [
+    {
+      "backend": "CUDA",
+      "target_devices": ["Nvidia GPU"],
+      "os_support": ["Linux", "Windows"],
+      "probe_commands": [
+        "nvidia-smi",
+        "nvcc --version"
+      ],
+      "sdk_commands": [
+        "nvcc --version",
+        "pkg-config --exists cudart"
+      ],
+      "sdk_missing_warning": "NVIDIA GPU detected but CUDA toolkit not installed. Install: sudo apt install nvidia-cuda-toolkit",
+      "cmake_flags": ["-DGGML_CUDA=ON"],
+      "priority": 1,
+      "fallback": "Vulkan"
+    },
+    {
+      "backend": "Metal",
+      "target_devices": ["Apple Silicon"],
+      "os_support": ["macOS"],
+      "probe_commands": [
+        "sysctl -a | grep machdep.cpu.brand_string | grep 'Apple'",
+        "system_profiler SPDisplaysDataType | grep 'Metal'"
+      ],
+      "sdk_commands": [
+        "xcrun --sdk macosx --show-sdk-path"
+      ],
+      "sdk_missing_warning": "Apple Silicon detected but Xcode command-line tools not installed. Install: xcode-select --install",
+      "cmake_flags": ["-DGGML_METAL=ON"],
+      "priority": 1,
+      "fallback": null
+    },
+    {
+      "backend": "HIP",
+      "target_devices": ["AMD GPU"],
+      "os_support": ["Linux", "Windows"],
+      "probe_commands": [
+        "rocminfo",
+        "rocm-smi"
+      ],
+      "sdk_commands": [
+        "hipconfig",
+        "hipcc --version"
+      ],
+      "sdk_missing_warning": "AMD GPU detected but ROCm/HIP not installed. Install: sudo apt install rocm-dev",
+      "cmake_flags": ["-DGGML_HIPBLAS=ON"],
+      "priority": 2,
+      "fallback": "Vulkan"
+    },
+    {
+      "backend": "SYCL",
+      "target_devices": ["Intel GPU"],
+      "os_support": ["Linux", "Windows"],
+      "probe_commands": [
+        "sycl-ls",
+        "clinfo"
+      ],
+      "sdk_commands": [
+        "sycl-ls"
+      ],
+      "sdk_missing_warning": "Intel GPU detected but oneAPI/SYCL not installed. Install: sudo apt install intel-oneapi-runtime",
+      "cmake_flags": ["-DGGML_SYCL=ON"],
+      "priority": 3,
+      "fallback": "OpenVINO"
+    },
+    {
+      "backend": "Vulkan",
+      "target_devices": ["GPU (Cross-vendor fallback)"],
+      "os_support": ["Linux", "Windows", "macOS", "Android"],
+      "probe_commands": [
+        "vulkaninfo --summary"
+      ],
+      "sdk_commands": [
+        "vulkaninfo --summary"
+      ],
+      "sdk_missing_warning": "GPU detected but Vulkan runtime not installed. Install mesa-vulkan-drivers",
+      "cmake_flags": ["-DGGML_VULKAN=ON"],
+      "priority": 4,
+      "fallback": "CPU"
+    },
+    {
+      "backend": "MUSA",
+      "target_devices": ["Moore Threads GPU"],
+      "os_support": ["Linux"],
+      "probe_commands": [
+        "musa-smi"
+      ],
+      "sdk_commands": [
+        "musa-smi"
+      ],
+      "sdk_missing_warning": "Moore Threads GPU detected but MUSA toolkit not installed.",
+      "cmake_flags": ["-DGGML_MUSA=ON"],
+      "priority": 5,
+      "fallback": "CPU"
+    },
+    {
+      "backend": "CANN",
+      "target_devices": ["Ascend NPU"],
+      "os_support": ["Linux"],
+      "probe_commands": [
+        "npu-smi info"
+      ],
+      "sdk_commands": [
+        "npu-smi info"
+      ],
+      "sdk_missing_warning": "Ascend NPU detected but CANN toolkit not installed.",
+      "cmake_flags": ["-DGGML_CANN=ON"],
+      "priority": 6,
+      "fallback": "CPU"
+    },
+    {
+      "backend": "OpenVINO",
+      "target_devices": ["Intel CPUs, GPUs, and NPUs"],
+      "os_support": ["Linux", "Windows"],
+      "probe_commands": [
+        "cat /proc/cpuinfo | grep -i intel"
+      ],
+      "sdk_commands": [
+        "pkg-config --exists openvino"
+      ],
+      "sdk_missing_warning": "Intel hardware detected but OpenVINO not installed. Install: pip install openvino",
+      "cmake_flags": ["-DGGML_OPENVINO=ON"],
+      "priority": 7,
+      "fallback": "BLAS"
+    },
+    {
+      "backend": "HYBRID",
+      "target_devices": ["Intel iGPU (Iris Xe, UHD)", "AMD APU iGPU (Radeon Vega/RDNA)", "ARM Mali/Adreno"],
+      "os_support": ["Linux", "Windows"],
+      "probe_commands": [
+        "lspci 2>/dev/null | grep -iE 'VGA.*(Intel|AMD)' | grep -iv 'NVIDIA'",
+        "vulkaninfo --summary 2>/dev/null | grep -i 'deviceType.*integrated'"
+      ],
+      "uma_check": "vulkaninfo 2>/dev/null | grep -A5 'memoryProperties' | grep -i 'HOST_VISIBLE.*DEVICE_LOCAL'",
+      "sdk_commands": ["pkg-config --exists vulkan", "vulkaninfo --summary"],
+      "cmake_flags": ["-DGGML_HYBRID=ON", "-DGGML_VULKAN=ON"],
+      "priority": 3,
+      "fallback": "Vulkan",
+      "notes": "The hybrid backend requires Vulkan for iGPU compute. If iGPU detected but no UMA, falls back to Vulkan-only."
+    }
+  ],
+  "cpu_fallbacks": [
+    {
+      "backend": "BLAS",
+      "description": "Standard CPU acceleration (OpenBLAS/BLIS)",
+      "cmake_flags": ["-DGGML_BLAS=ON"]
+    },
+    {
+      "backend": "Native",
+      "description": "Native CPU instruction set optimization (AVX/AVX2/AVX512/ARM NEON)",
+      "cmake_flags": ["-DGGML_NATIVE=ON"]
+    }
+  ],
+  "build_instructions": {
+    "clone": "git clone https://github.com/ggml-org/llama.cpp",
+    "configure": "cmake -B build {DYNAMIC_CMAKE_FLAGS}",
+    "compile": "cmake --build build --config Release"
+  }
+}

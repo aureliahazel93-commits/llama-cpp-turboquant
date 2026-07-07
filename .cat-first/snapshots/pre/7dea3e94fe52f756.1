@@ -213,7 +213,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-
+#include "ggml-quant-caps.h"
 #define GGML_FILE_MAGIC   0x67676d6c // "ggml"
 #define GGML_FILE_VERSION 2
 
@@ -342,7 +342,7 @@ __host__ __device__ constexpr inline void ggml_unused_vars_impl(Args&&...) noexc
     GGML_TENSOR_LOCALS(int64_t, ne1, src1, ne) \
     GGML_TENSOR_LOCALS(size_t,  nb1, src1, nb)
 
-#ifdef __cplusplus
+#ifdef  __cplusplus
 extern "C" {
 #endif
 
@@ -435,13 +435,7 @@ extern "C" {
         GGML_TYPE_TURBO4_0 = 44, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant
         GGML_TYPE_TQ3_1S  = 45, // TurboQuant 3-bit weight: WHT-rotated 8-level Lloyd-Max, block_size=32
         GGML_TYPE_TQ4_1S  = 46, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
-        GGML_TYPE_PLANAR3_0 = 47, // PlanarQuant 3-bit KV cache: 2D Givens rotation + 2-bit scalar + 1-bit QJL
-        GGML_TYPE_ISO3_0    = 48, // IsoQuant 3-bit KV cache: quaternion 4D rotation + 2-bit scalar + 1-bit QJL
-        GGML_TYPE_PLANAR4_0 = 49, // PlanarQuant 4-bit KV cache: 2D Givens rotation + 3-bit scalar + 1-bit QJL
-        GGML_TYPE_ISO4_0    = 50, // IsoQuant 4-bit KV cache: quaternion 4D rotation + 3-bit scalar + 1-bit QJL
-        GGML_TYPE_STQ1_0   = 51, // AngelSlim STQ: 1.31 bpw structured ternary, 32-entry codebook
-        GGML_TYPE_TEQUILA   = 52, // AngelSlim Tequila: 2.0 bpw deadzone-aware ternary, imatrix-weighted
-        GGML_TYPE_COUNT     = 53,
+        GGML_TYPE_COUNT   = 47,
     };
 
     // precision
@@ -2881,10 +2875,6 @@ extern "C" {
     GGML_API void                          ggml_threadpool_params_init   (struct ggml_threadpool_params * p, int n_threads);
     GGML_API bool                          ggml_threadpool_params_match  (const struct ggml_threadpool_params * p0, const struct ggml_threadpool_params * p1);
 
-
-
-#ifdef __cplusplus
+#ifdef  __cplusplus
 }
 #endif
-
-#include "ggml-quant-caps.h"

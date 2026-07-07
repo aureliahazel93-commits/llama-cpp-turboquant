@@ -1,0 +1,296 @@
+{
+  "fix_plan_name": "priority-fixes-phases-8-16",
+  "source": "audit_findings",
+  "base_repo": "/home/ethan/llama-cpp-mod",
+  "total_fixes": 6,
+  "estimated_time": "2-3 hours",
+  "fixes": [
+    {
+      "priority": 1,
+      "severity": "CRITICAL",
+      "phase": 15,
+      "title": "Fix GLSL uint8_t/int8_t type errors in Vulkan compute shaders",
+      "problem": "GLSL has no uint8_t or int8_t type. All three .comp shaders declare SSBOs with uint8_t arrays, which glslangValidator will reject. The shader logic is correct — only the type declarations are broken.",
+      "impact": "Shaders will not compile. Phase 15 is completely blocked.",
+      "files": [
+        {
+          "path": "ggml/src/ggml-hybrid/shaders/gemm_q4_0.comp",
+          "changes": [
+            {
+              "search": "layout(set = 0, binding = 0) readonly buffer WeightData { uint8_t weights[]; };",
+              "replace": "layout(set = 0, binding = 0) readonly buffer WeightData { uint weights[]; };"
+            },
+            {
+              "search": "float dequant_q4_0_element(uint byte_index, uint8_t nibble_val, float d) {",
+              "replace": "float dequant_q4_0_element(uint byte_index, uint nibble_raw, float d) {"
+            },
+            {
+              "search": "uint8_t raw = weights[block_offset + 2 + byte_idx];",
+              "replace": "// Extract byte from uint array: each uint holds 4 bytes\n    uint word = weights[(block_offset + 2 + byte_idx) / 4];\n    uint byte_pos = (block_offset + 2 + byte_idx) % 4;\n    uint raw = (word >> (byte_pos * 8)) & 0xFF;",
+              "note": "GLSL SSBO uint arrays pack 4 bytes per uint element. Must extract byte by position."
+            },
+            {
+              "search": "// Q4_0 block layout: { fp16 d; uint8_t qs[16]; } = 18 bytes per 32 weights",
+              "replace": "// Q4_0 block layout: { fp16 d; uint8 qs[16]; } = 18 bytes per 32 weights\n// NOTE: GLSL has no uint8_t. Weight data is accessed as uint[] SSBO, bytes extracted by bit-shift."
+            }
+          ]
+        },
+        {
+          "path": "ggml/src/ggml-hybrid/shaders/gemm_q8_0.comp",
+          "changes": [
+            {
+              "search": "layout(set = 0, binding = 0) readonly buffer WeightData { uint8_t weights[]; };",
+              "replace": "layout(set = 0, binding = 0) readonly buffer WeightData { uint weights[]; };"
+            },
+            {
+              "search": "uint d_bits = uint(weights[block_offset]) | (uint(weights[block_offset + 1]) << 8);",
+              "replace": "// Extract 2 bytes for fp16 scale from uint array\n    uint word0 = weights[block_offset / 4];\n    uint bp0 = block_offset % 4;\n    uint word1 = weights[(block_offset + 1) / 4];\n    uint bp1 = (block_offset + 1) % 4;\n    uint d_bits = ((word0 >> (bp0 * 8)) & 0xFF) | (((word1 >> (bp1 * 8)) & 0xFF) << 8);"
+            },
+            {
+              "search": "int8_t qs_val = int8_t(weights[block_offset + 2 + lane]);",
+              "replace": "// Extract int8 from uint array\n    uint qs_offset = block_offset + 2 + lane;\n    uint qs_word = weights[qs_offset / 4];\n    uint qs_bp = qs_offset % 4;\n    uint qs_raw = (qs_word >> (qs_bp * 8)) & 0xFF;\n    int qs_val = int(qs_raw);\n    if (qs_val > 127) qs_val -= 256;  // interpret as signed int8"
+            },
+            {
+              "search": "uint d_bits = uint(weights[block_offset])",
+              "replace": "// (already replaced above in the d_bits change)"
+            }
+          ]
+        },
+        {
+          "path": "ggml/src/ggml-hybrid/shaders/gemm_q4_k.comp",
+          "changes": [
+            {
+              "search": "//   { uint8_t scales[12];",
+              "replace": "//   { uint8 scales[12];"
+            },
+            {
+              "search": "//     uint8_t qs[256];",
+              "replace": "//     uint8 qs[256];"
+            },
+            {
+              "search": "//     uint8_t qmins[32];",
+              "replace": "//     uint8 qmins[32];"
+            },
+            {
+              "search": "layout(set = 0, binding = 0) readonly buffer WeightData { uint weights[]; };",
+              "replace": "layout(set = 0, binding = 0) readonly buffer WeightData { uint weights[]; };",
+              "note": "Q4_K already uses uint — verify no uint8_t in SSBO declaration. Only comments use uint8_t which is fine as they are not compiled."
+            }
+          ]
+        }
+      ],
+      "validation": [
+        "glslangValidator -V ggml/src/ggml-hybrid/shaders/gemm_q4_0.comp exits 0",
+        "glslangValidator -V ggml/src/ggml-hybrid/shaders/gemm_q8_0.comp exits 0",
+        "grep -c 'uint8_t' ggml/src/ggml-hybrid/shaders/gemm_q4_0.comp returns 0 (outside comments)",
+        "grep -c 'int8_t' ggml/src/ggml-hybrid/shaders/gemm_q8_0.comp returns 0 (outside comments)"
+      ],
+      "block_until_pass": true
+    },
+    {
+      "priority": 2,
+      "severity": "HIGH",
+      "phase": 9,
+      "title": "Replace hardcoded k_is_deferred with caps-driven predicate",
+      "problem": "Phase 5 refactored needs_wht/turbo_family/head_align to use ggml_quant_caps, but missed the deferred allocation check. Line 404 still has the old hardcoded type list. Adding a new deferred quant type would require editing this line instead of just adding a caps entry.",
+      "impact": "Defeats the modular caps design for deferred types. New deferred quants require kv-cache.cpp changes instead of caps-only changes.",
+      "files": [
+        {
+          "path": "src/llama-kv-cache.cpp",
+          "changes": [
+            {
+              "search": "const bool k_is_deferred = (layer_type_k == GGML_TYPE_PLANAR3_0 || layer_type_k == GGML_TYPE_ISO3_0 || layer_type_k == GGML_TYPE_PLANAR4_0 || layer_type_k == GGML_TYPE_ISO4_0);",
+              "replace": "const bool k_is_deferred = ggml_type_needs_deferred(layer_type_k);",
+              "note": "ggml_type_needs_deferred() is already defined in ggml-quant-caps.h and reads caps->needs_deferred. The caps entries for all 4 planar/iso types already have needs_deferred=true. This is a 1-line fix."
+            }
+          ]
+        }
+      ],
+      "validation": [
+        "cmake --build build -j$(nproc) exits 0",
+        "grep -c 'GGML_TYPE_PLANAR3_0.*GGML_TYPE_ISO3_0.*GGML_TYPE_PLANAR4_0.*GGML_TYPE_ISO4_0' src/llama-kv-cache.cpp returns 0",
+        "grep -c 'ggml_type_needs_deferred' src/llama-kv-cache.cpp returns >= 1",
+        "Functional: load model with -ctk planar3_0, verify deferred allocation still triggers"
+      ],
+      "block_until_pass": true
+    },
+    {
+      "priority": 3,
+      "severity": "MEDIUM",
+      "phase": 14,
+      "title": "Fix RESTPECT typo and add vfmlaq ISA guard",
+      "problem": "Two bugs in mul-mat-dispatch.cpp: (1) GGML_RESTPECT typo causes compile error on strict compilers, (2) vfmlaq_f32 requires ARMv8.1-A FCMA feature but has no guard — will SIGILL on Cortex-A53/A72.",
+      "impact": "Compile error on strict compilers (typo). Runtime crash on ARMv8.0 CPUs (illegal instruction).",
+      "files": [
+        {
+          "path": "ggml/src/ggml-hybrid/compute/mul-mat-dispatch.cpp",
+          "changes": [
+            {
+              "search": "const float * GGML_RESTPECT x_data,",
+              "replace": "const float * GGML_RESTRICT x_data,",
+              "note": "Line 135. Simple typo fix."
+            },
+            {
+              "search": "acc0 = vfmlaq_f32(acc0, w0, x0);\n                acc0 = vfmlaq_f32(acc0, w1, x1);\n                acc0 = vfmlaq_f32(acc0, w2, x2);\n                acc0 = vfmlaq_f32(acc0, w3, x3);\n\n                acc1 = vfmlaq_f32(acc1, w0, x4);\n                acc1 = vfmlaq_f32(acc1, w1, x5);\n                acc1 = vfmlaq_f32(acc1, w2, x6);\n                acc1 = vfmlaq_f32(acc1, w3, x7);",
+              "replace": "#if defined(__ARM_FEATURE_FCMA)\n                // ARMv8.1+: use fused multiply-accumulate (single instruction)\n                acc0 = vfmlaq_f32(acc0, w0, x0);\n                acc0 = vfmlaq_f32(acc0, w1, x1);\n                acc0 = vfmlaq_f32(acc0, w2, x2);\n                acc0 = vfmlaq_f32(acc0, w3, x3);\n\n                acc1 = vfmlaq_f32(acc1, w0, x4);\n                acc1 = vfmlaq_f32(acc1, w1, x5);\n                acc1 = vfmlaq_f32(acc1, w2, x6);\n                acc1 = vfmlaq_f32(acc1, w3, x7);\n#else\n                // ARMv8.0 (A53, A72): use separate multiply + add\n                acc0 = vaddq_f32(acc0, vmulq_f32(w0, x0));\n                acc0 = vaddq_f32(acc0, vmulq_f32(w1, x1));\n                acc0 = vaddq_f32(acc0, vmulq_f32(w2, x2));\n                acc0 = vaddq_f32(acc0, vmulq_f32(w3, x3));\n\n                acc1 = vaddq_f32(acc1, vmulq_f32(w0, x4));\n                acc1 = vaddq_f32(acc1, vmulq_f32(w1, x5));\n                acc1 = vaddq_f32(acc1, vmulq_f32(w2, x6));\n                acc1 = vaddq_f32(acc1, vmulq_f32(w3, x7));\n#endif",
+              "note": "Lines 245-253. vfmlaq_f32 (FCMA) is ARMv8.1+. The fallback uses vmulq_f32 + vaddq_f32 which works on all ARMv8 NEON targets."
+            }
+          ]
+        }
+      ],
+      "validation": [
+        "grep -c 'RESTPECT' ggml/src/ggml-hybrid/compute/mul-mat-dispatch.cpp returns 0",
+        "grep -c '__ARM_FEATURE_FCMA' ggml/src/ggml-hybrid/compute/mul-mat-dispatch.cpp returns >= 1",
+        "On ARMv8.0 target (or cross-compile): compiles without SIGILL risk"
+      ],
+      "block_until_pass": false
+    },
+    {
+      "priority": 4,
+      "severity": "MEDIUM",
+      "phase": 13,
+      "title": "Wire hybrid backend into the build system",
+      "problem": "ggml-hybrid/ directory exists with all source files but is never compiled. No GGML_HYBRID option in any CMakeLists.txt, no add_subdirectory call. The backend is invisible to the build.",
+      "impact": "Entire hybrid backend (Phases 13-16) is dead code — never compiled, never tested.",
+      "files": [
+        {
+          "path": "ggml/CMakeLists.txt",
+          "changes": [
+            {
+              "search": "option(GGML_VULKAN",
+              "insert_before": "option(GGML_HYBRID                            \"ggml: use hybrid CPU+iGPU backend (requires Vulkan)\"   OFF)\n",
+              "note": "Add the option near the other backend options (around line 220)."
+            }
+          ]
+        },
+        {
+          "path": "ggml/src/CMakeLists.txt",
+          "changes": [
+            {
+              "search": "if(GGML_VULKAN)",
+              "insert_before": "if(GGML_HYBRID)\n    message(STATUS \"Hybrid CPU+iGPU backend enabled\")\n    if(NOT GGML_VULKAN)\n        message(FATAL_ERROR \"GGML_HYBRID requires GGML_VULKAN for iGPU compute\")\n    endif()\n    add_subdirectory(ggml-hybrid)\n    list(APPEND GGML_SOURCES $<TARGET_OBJECTS:ggml-hybrid>)\nendif()\n\n",
+              "note": "Add after the GGML_CPU section but before GGML_VULKAN. Requires Vulkan for the iGPU compute path."
+            }
+          ]
+        },
+        {
+          "path": "ggml/src/ggml-hybrid/CMakeLists.txt",
+          "changes": [
+            {
+              "search": "add_library(ggml-hybrid OBJECT",
+              "replace": "add_library(ggml-hybrid OBJECT",
+              "note": "Verify the CMakeLists.txt already creates an OBJECT library named ggml-hybrid. If not, create it. The OBJECT library is consumed by the parent via $<TARGET_OBJECTS:ggml-hybrid>."
+            }
+          ]
+        }
+      ],
+      "validation": [
+        "cmake -B build -DGGML_HYBRID=ON -DGGML_VULKAN=ON exits 0",
+        "cmake --build build -j$(nproc) exits 0 (hybrid objects compiled)",
+        "grep -c 'ggml-hybrid' ggml/src/CMakeLists.txt returns >= 1"
+      ],
+      "block_until_pass": false
+    },
+    {
+      "priority": 5,
+      "severity": "LOW",
+      "phase": 12,
+      "title": "Implement calibrate_model() orchestrator with llama_decode integration",
+      "problem": "calibrate_model() is declared in calibrator.h but has no implementation file. The calibration algorithms (kl_entropy, aciq, eq_refine) are implemented, but there is no code that (1) loads a model, (2) runs llama_decode() with calibration text, (3) collects intermediate activations, (4) feeds them to the calibration algorithms. llama-calibrate binary is not built.",
+      "impact": "Calibration suite cannot be used end-to-end. The KL/ACIQ/EQ algorithms work standalone but have no integration with llama.cpp's forward pass.",
+      "files": [
+        {
+          "path": "tools/stability/calibrator.cpp",
+          "action": "CREATE — implementation file for calibrate_model()",
+          "implementation_plan": [
+            "1. Load model: llama_model_load(model_path) + llama_init_from_model()",
+            "2. Parse calibration_data: read text file, one sample per line",
+            "3. For each sample (up to config.n_calibration_samples):",
+            "   a. Tokenize: llama_tokenize(vocab, sample, tokens, ...)",
+            "   b. Create batch: llama_batch_init(n_tokens, n_embd, 1)",
+            "   c. Decode: llama_decode(ctx, batch)",
+            "   d. Extract activations per layer via ggml graph interception:",
+            "      - Set a callback on each matmul input tensor",
+            "      - Record absmax + histogram per tensor name",
+            "   e. If calibrate_kv_cache: also collect KV tensor values from llama_kv_cache",
+            "4. After all samples: compute scales using config.method",
+            "   - KL_ENTROPY: call compute_kl_threshold() per tensor",
+            "   - ACIQ: call compute_aciq_scale() per tensor",
+            "   - EQ_REFINE: seed from KL, then call refine_layer_scale() per layer",
+            "5. Write scale table: write_scale_table(output_table_path, entries)",
+            "6. Return 0 on success",
+            "Integration challenge: step 3d requires either:",
+            "  (a) A ggml graph callback API to intercept intermediate tensors, OR",
+            "  (b) A custom llama_context hook that copies activations after each layer, OR",
+            "  (c) Replacing the model's forward graph with an instrumented version",
+            "Approach (b) is simplest: add a callback to llama_context that fires after each transformer layer, providing access to the activation tensors. The imatrix collection in llama.cpp already uses a similar mechanism (cb_eval)."
+          ]
+        },
+        {
+          "path": "tools/stability/quantize_with_scales.cpp",
+          "action": "CREATE — implementation of quantize_with_scales()",
+          "implementation_plan": [
+            "1. Read scale table: read_scale_table(table_path) → map<tensor_name, scales>",
+            "2. Load GGUF model: llama_model_load(model_path)",
+            "3. For each weight tensor:",
+            "   a. Look up scale by tensor name in the table",
+            "   b. If found: pass scale to ggml_quantize_chunk() (same path as imatrix)",
+            "   c. If missing: use default absmax quantization",
+            "4. Write output GGUF: standard llama-quantize output path",
+            "Note: llama-quantize already accepts an imatrix parameter. The scale table",
+            "plugs into the same code path — pass it as the imatrix argument to",
+            "llama_model_quantize(). The per-channel scales are interpreted as",
+            "importance weights that guide the quantization thresholds."
+          ]
+        },
+        {
+          "path": "tools/stability/CMakeLists.txt",
+          "changes": [
+            {
+              "search": "# (check if llama-calibrate target already exists)",
+              "replace": "add_executable(llama-calibrate\n    calibrator.cpp\n    quantize_with_scales.cpp\n    kl_entropy.cpp\n    aciq.cpp\n    eq_refine.cpp\n    scale_table.cpp\n)\ntarget_link_libraries(llama-calibrate PRIVATE llama llama-common)\ninstall(TARGETS llama-calibrate RUNTIME DESTINATION bin)",
+              "note": "If the CMakeLists.txt already has this target commented out, uncomment it. Otherwise add it."
+            }
+          ]
+        }
+      ],
+      "validation": [
+        "cmake --build build --target llama-calibrate exits 0",
+        "build/bin/llama-calibrate --help exits 0",
+        "build/bin/llama-calibrate --model <test.gguf> --method aciq --calibrate <data.txt> --output test.table produces non-empty table",
+        "wc -l test.table returns > 0"
+      ],
+      "block_until_pass": false,
+      "note": "This is the largest fix — requires new implementation files. The calibration algorithms themselves are done; this is purely the integration glue. The cb_eval callback approach from llama.cpp's imatrix tooling is the reference pattern."
+    },
+    {
+      "priority": 6,
+      "severity": "LOW",
+      "phase": 12,
+      "title": "Add Q4_K shader full implementation (6-bit scale unpacking)",
+      "problem": "gemm_q4_k.comp is a scaffold — the Q4_K super-block structure uses 6-bit packed scales that need bit manipulation to unpack. The shader has placeholder comments instead of the actual dequant math.",
+      "impact": "Q4_K (the most popular weight quant type) has no working iGPU shader. Q4_0 and Q8_0 shaders are production-ready.",
+      "files": [
+        {
+          "path": "ggml/src/ggml-hybrid/shaders/gemm_q4_k.comp",
+          "action": "REWRITE — implement full 6-bit scale unpacking",
+          "implementation_detail": "Q4_K block (144 bytes per 256 weights):\n  - d (2B fp16): super-block scale\n  - dmin (2B fp16): super-block min scale  \n  - scales (12B): 8x 6-bit packed scales (Llama.cpp 6-bit encoding)\n  - qs (128B): 256 nibbles packed 2-per-byte\n\nThe 6-bit scale encoding packs 8 scales into 12 bytes:\n  scales[0] = (s[0] & 0x3F)\n  scales[1] = ((s[0] >> 6) | (s[1] << 2)) & 0x3F\n  scales[2] = ((s[1] >> 4) | (s[2] << 4)) & 0x3F\n  scales[3] = ((s[2] >> 2)) & 0x3F\n  (repeat for scales 4-7 using s[3..5])\n  scales[4] = (s[6] & 0x3F) | ((s[8] & 0x0F) << 6)\n  ...\n\nIn GLSL, read from uint[] SSBO and extract bytes via bit-shift.\n\nThe shader should:\n1. Load the super-block scale d and dmin\n2. Unpack the 8 6-bit sub-block scales\n3. For each sub-block (32 weights): dequant w = d * sub_scale * (q - 8) - dmin * sub_min\n4. Subgroup cooperative dot product as in Q4_0 shader"
+        }
+      ],
+      "validation": [
+        "glslangValidator -V gemm_q4_k.comp exits 0",
+        "Q4_K GEMM output matches CPU reference within fp32 epsilon"
+      ],
+      "block_until_pass": false,
+      "note": "Lower priority — Q4_0 and Q8_0 shaders are production-ready and cover most use cases. Q4_K can be added later."
+    }
+  ],
+  "execution_order": [
+    "Fix 1 (GLSL types) — blocks Phase 15 entirely",
+    "Fix 2 (k_is_deferred caps) — 1-line, completes Phase 9 modularity",
+    "Fix 3 (typo + vfmlaq guard) — compile/crash fix for Phase 14",
+    "Fix 4 (hybrid in build) — unblocks compilation of Phases 13-16",
+    "Fix 5 (calibrate_model impl) — largest effort, enables calibration end-to-end",
+    "Fix 6 (Q4_K shader) — lowest priority, Q4_0/Q8_0 already work"
+  ]
+}

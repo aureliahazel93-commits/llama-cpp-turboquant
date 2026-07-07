@@ -1,0 +1,40 @@
+# Model architecture compilation
+option(LLAMA_BUILD_ALL_MODELS "Build all model architectures" ON)
+set(LLAMA_MODEL_WHITELIST "" CACHE STRING "Comma-separated model names (empty=all, e.g. 'gemma4,qwen3,phi3')")
+set(LLAMA_MODEL_BLACKLIST "" CACHE STRING "Comma-separated model names to exclude")
+
+file(GLOB MODEL_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+
+# Apply whitelist
+if(NOT LLAMA_BUILD_ALL_MODELS AND LLAMA_MODEL_WHITELIST)
+    string(REPLACE "," ";" _whitelist "${LLAMA_MODEL_WHITELIST}")
+    set(_filtered)
+    foreach(_src ${MODEL_SOURCES})
+        get_filename_component(_name ${_src} NAME_WE)
+        if(_name IN_LIST _whitelist)
+            list(APPEND _filtered ${_src})
+        endif()
+    endforeach()
+    set(MODEL_SOURCES ${_filtered})
+endif()
+
+# Apply blacklist
+if(LLAMA_MODEL_BLACKLIST)
+    string(REPLACE "," ";" _blacklist "${LLAMA_MODEL_BLACKLIST}")
+    foreach(_name ${_blacklist})
+        list(FILTER MODEL_SOURCES EXCLUDE REGEX "^${_name}\\.cpp$")
+    endforeach()
+endif()
+
+# Generate compiled-archs list for runtime validation
+set(_compiled_archs "")
+foreach(_src ${MODEL_SOURCES})
+    get_filename_component(_name ${_src} NAME_WE)
+    list(APPEND _compiled_archs ${_name})
+endforeach()
+string(REPLACE ";" "," _compiled_archs_str "${_compiled_archs}")
+list(LENGTH MODEL_SOURCES MODEL_SOURCES_COUNT)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/compiled-archs.h.in ${CMAKE_CURRENT_BINARY_DIR}/compiled-archs.h @ONLY)
+
+set(LLAMA_MODELS_SOURCES ${MODEL_SOURCES} PARENT_SCOPE)
+message(STATUS "Models: ${_compiled_archs_str} (${MODEL_SOURCES_COUNT} files)")

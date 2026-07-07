@@ -1,0 +1,13 @@
+FILE=/home/ethan/llama-cpp-mod/src/llama-model-loader.cpp
+START=1
+END=1724
+SNAPSHOT=/home/ethan/llama-cpp-mod/.cat-first/snapshots/pre/8d21845db02f372f.2
+TAIL=/home/ethan/llama-cpp-mod/.cat-first/cache/llama-model-loader.cpp.temp.1b27ba53cb282e2c.tail
+LOCK=/home/ethan/llama-cpp-mod/.cat-first/cache/llama-model-loader.cpp.lock
+REPLACED_HASH=7ff54cac74509a3c253144c98393833e3cf6585bd76614e5830ebddb452e1d23
+FILE_INO=40:21564297
+FULL_HASH=7ff54cac74509a3c253144c98393833e3cf6585bd76614e5830ebddb452e1d23
+BASENAME=llama-model-loader.cpp
+RELPATH=src/llama-model-loader.cpp
+PATH_HASH=8d21845db02f372f
+TITLE=pre-phase18-snapshot

@@ -1,0 +1,50 @@
+#include "ggml-backend-quant.h"
+#include <string.h>
+
+#define MAX_BACKENDS 16
+#define MAX_QUANT_OPS 64
+
+struct backend_quant_entry {
+    ggml_backend_dev_t dev;
+    enum ggml_type type;
+    struct ggml_backend_quant_ops ops;
+};
+
+static struct backend_quant_entry registry[MAX_BACKENDS * MAX_QUANT_OPS];
+static int registry_count = 0;
+
+void ggml_backend_register_quant_ops(
+    ggml_backend_dev_t dev,
+    enum ggml_type type,
+    const struct ggml_backend_quant_ops * ops) {
+    if (registry_count >= MAX_BACKENDS * MAX_QUANT_OPS) return;
+    for (int i = 0; i < registry_count; i++) {
+        if (registry[i].dev == dev && registry[i].type == type) {
+            registry[i].ops = *ops;
+            return;
+        }
+    }
+    registry[registry_count].dev = dev;
+    registry[registry_count].type = type;
+    registry[registry_count].ops = ops ? *ops : (struct ggml_backend_quant_ops){0};
+    registry_count++;
+}
+
+bool ggml_backend_supports_quant(ggml_backend_dev_t dev, enum ggml_type type) {
+    for (int i = 0; i < registry_count; i++) {
+        if (registry[i].dev == dev && registry[i].type == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
+const struct ggml_backend_quant_ops * ggml_backend_get_quant_ops(
+    ggml_backend_dev_t dev, enum ggml_type type) {
+    for (int i = 0; i < registry_count; i++) {
+        if (registry[i].dev == dev && registry[i].type == type) {
+            return &registry[i].ops;
+        }
+    }
+    return NULL;
+}

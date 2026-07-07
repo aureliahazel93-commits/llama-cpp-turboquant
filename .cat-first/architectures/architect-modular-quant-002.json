@@ -1,0 +1,1233 @@
+{
+  "plan_name": "llama-cpp-mod-5axis",
+  "source": "user_provided",
+  "base_repo": "/home/ethan/llama-cpp-mod",
+  "base_branch": "feature/turboquant-kv-cache",
+  "base_commit": "3d42fa1eb",
+  "existing_assets": {
+    "prober": "llama_prober.py + llama_prober_config.json — config-driven hardware probe, already working",
+    "turbo": "GGML_TYPE_TURBO3_0/4_0/2_0 — implemented in kv-cache, graph, CUDA, Vulkan",
+    "missing": "GGML_TYPE_PLANAR3_0/ISO3_0/PLANAR4_0/ISO4_0 — not yet ported"
+  },
+  "axes": {
+    "axis_1": "quant_caps — semantic capability table replacing 27 hardcoded type checks in kv-cache + graph",
+    "axis_2": "gpu_prober — CMake-time auto-detection using existing llama_prober.py + runtime backend quant registration",
+    "axis_3": "cpu_fallback — automatic dequant→F16→compute→requant when no GPU kernel exists for a quant type",
+    "axis_4": "model_modular — selective model compilation via CMake whitelist/blacklist",
+    "axis_5": "hybrid_uma — heterogeneous CPU+iGPU backend exploiting Unified Memory Architecture for edge devices (cactus-kernels philosophy: zero-copy UMA tensor slicing, Vulkan subgroup dequant, adaptive thermal balancing)"
+  },
+  "dependency_graph": {
+    "phase_0_baseline": [],
+    "phase_1_prober_cmake": [],
+    "phase_2_quant_caps": [],
+    "phase_3_backend_registration": ["phase_2_quant_caps"],
+    "phase_4_cpu_fallback": ["phase_3_backend_registration"],
+    "phase_5_refactor_kv_cache": ["phase_2_quant_caps"],
+    "phase_6_refactor_graph": ["phase_2_quant_caps"],
+    "phase_7_model_modular": [],
+    "phase_8_port_planar_iso": ["phase_2_quant_caps", "phase_5_refactor_kv_cache", "phase_6_refactor_graph"],
+    "phase_9_port_deferred": ["phase_8_port_planar_iso"],
+    "phase_10_port_hrm": ["phase_9_port_deferred"],
+    "phase_11_port_weight_compression": ["phase_2_quant_caps"],
+    "phase_12_port_stability": [],
+    "phase_13_hybrid_backend_skeleton": ["phase_3_backend_registration"],
+    "phase_14_hybrid_uma_slicing": ["phase_13_hybrid_backend_skeleton"],
+    "phase_15_hybrid_vulkan_shaders": ["phase_14_hybrid_uma_slicing", "phase_2_quant_caps"],
+    "phase_16_hybrid_thermal_balancer": ["phase_14_hybrid_uma_slicing"],
+    "phase_17_hybrid_prober_entry": ["phase_13_hybrid_backend_skeleton"],
+    "phase_18_stq1_0_integration": ["phase_2_quant_caps"],
+    "phase_19_tequila_ternary": ["phase_2_quant_caps"],
+    "phase_20_angelslim_algorithms": ["phase_2_quant_caps", "phase_12_port_stability_modules"]
+  },
+  "builder_instructions": {
+    "overview": "5 independent axes implemented in parallel-capable phases. Each phase is self-contained: build, verify, commit. The prober (axis 2) and quant caps (axis 1) have zero dependencies on each other. Backend registration (axis 2 cont.) depends on caps existing. CPU fallback (axis 3) depends on registration. Model modularity (axis 4) is fully independent. The hybrid UMA backend (axis 5) depends on backend registration (phase 3) and quant caps (phase 2) but is independent of the kv-cache/graph refactoring.",
+    "phases": [
+      {
+        "phase": 0,
+        "name": "verify_baseline",
+        "axis": "none",
+        "description": "Verify the current turboquant branch builds cleanly before any changes.",
+        "steps": [
+          "cd /home/ethan/llama-cpp-mod",
+          "cmake -B build -DGGML_CUDA=ON (or OFF for CPU-only, depending on machine)",
+          "cmake --build build -j$(nproc)",
+          "Verify: build/bin/llama-cli --help exits 0"
+        ],
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "No pre-existing errors"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 1,
+        "name": "prober_cmake_integration",
+        "axis": "axis_2_gpu_prober",
+        "description": "Wire the existing llama_prober.py into CMake so that 'cmake -B build' auto-detects GPU backends with zero flags. Manual override still works (-DGGML_CUDA=OFF).",
+        "principle": "The prober already works (llama_prober.py outputs cmake flags). This phase just integrates it into the CMake configure step. The key: only run auto-detection if the user hasn't explicitly set ANY backend flag.",
+        "files": {
+          "create": [
+            {
+              "path": "cmake/gpu-probe.cmake",
+              "description": "CMake module that runs the prober and sets cache variables",
+              "content": "# Auto-detect GPU backends using llama_prober.py\n# Included from top-level CMakeLists.txt\n# Override: -DGGML_AUTO_PROBE=OFF to disable entirely\n\noption(GGML_AUTO_PROBE \"Auto-detect GPU backends via llama_prober.py\" ON)\n\nif(GGML_AUTO_PROBE)\n    # Check if user explicitly set any backend\n    set(_explicit_backend FALSE)\n    foreach(_backend CUDA METAL HIP HIPBLAS SYCL VULKAN BLAS MUSA CANN OPENVINO OPENCL)\n        if(DEFINED GGML_${_backend})\n            set(_explicit_backend TRUE)\n            message(STATUS \"GPU auto-probe: skipped (GGML_${_backend} explicitly set)\")\n            break()\n        endif()\n    endforeach()\n\n    if(NOT _explicit_backend)\n        find_program(PYTHON3_PROBE python3)\n        if(PYTHON3_PROBE)\n            execute_process(\n                COMMAND ${PYTHON3_PROBE} ${CMAKE_SOURCE_DIR}/llama_prober.py\n                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}\n                OUTPUT_VARIABLE _probe_output\n                RESULT_VARIABLE _probe_result\n                OUTPUT_STRIP_TRAILING_WHITESPACE\n            )\n            if(_probe_result EQUAL 0 AND _probe_output)\n                message(STATUS \"GPU auto-probe result: ${_probe_output}\")\n                separate_arguments(_probe_args UNIX_COMMAND \"${_probe_output}\")\n                foreach(_arg ${_probe_args})\n                    if(_arg MATCHES \"^-D(GGML_[A-Z]+)=ON$\")\n                        set(${CMAKE_MATCH_1} ON CACHE BOOL \"Auto-detected by gpu-prober\" FORCE)\n                    elseif(_arg MATCHES \"^-D(GGML_[A-Z]+)=OFF$\")\n                        set(${CMAKE_MATCH_1} OFF CACHE BOOL \"Auto-detected by gpu-prober\" FORCE)\n                    endif()\n                endforeach()\n            else()\n                message(STATUS \"GPU auto-probe: no GPUs detected, CPU-only build\")\n            endif()\n        else()\n            message(WARNING \"GPU auto-probe: python3 not found, skipping\")\n        endif()\n    endif()\nendif()\n"
+            }
+          ],
+          "modify": [
+            {
+              "path": "CMakeLists.txt",
+              "instruction": "Add 'include(cmake/gpu-probe.cmake)' BEFORE the ggml add_subdirectory call. Place it after the project() and option() declarations but before any backend-specific code. Search for 'add_subdirectory(ggml)' and insert the include before it.",
+              "search_for": "add_subdirectory(ggml)",
+              "insert_before": "# GPU auto-detection (runs llama_prober.py if no backends explicitly set)\ninclude(cmake/gpu-probe.cmake)\n"
+            },
+            {
+              "path": "llama_prober_config.json",
+              "instruction": "Add 'sdk_check' fields to each probe entry so the prober distinguishes hardware presence from SDK availability. This prevents enabling CUDA backend when GPU exists but nvcc isn't installed.",
+              "add_fields_example": "For CUDA probe, add: \"sdk_commands\": [\"nvcc --version\", \"pkg-config --exists cudart\"], \"sdk_missing_warning\": \"NVIDIA GPU detected but CUDA toolkit not installed. Install: sudo apt install nvidia-cuda-toolkit\""
+            },
+            {
+              "path": "llama_prober.py",
+              "instruction": "Extend to check 'sdk_commands' after 'probe_commands' succeeds. If hardware detected but SDK missing, print warning and skip backend. The existing logic stays — just add the SDK verification step after line 68 (after detected=true).",
+              "code_to_add_after_detection": "if detected and probe.get('sdk_commands'):\n    sdk_ok = False\n    for sdk_cmd in probe['sdk_commands']:\n        ok, _ = probe_command(sdk_cmd)\n        if ok:\n            sdk_ok = True\n            break\n    if not sdk_ok:\n        warning = probe.get('sdk_missing_warning', f'{backend}: SDK not found')\n        print(f'WARN: {warning}', file=sys.stderr)\n        detected = False\n        results[backend]['detected'] = False\n        results[backend]['reason'] = 'sdk_not_found'\n        continue"
+            }
+          ]
+        },
+        "validation": [
+          "cmake -B build (no flags) auto-detects and prints 'GPU auto-probe result: ...'",
+          "cmake -B build -DGGML_CUDA=OFF prints 'GPU auto-probe: skipped'",
+          "cmake -B build -DGGML_AUTO_PROBE=OFF skips probing entirely",
+          "cmake --build build -j$(nproc) exits 0"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 2,
+        "name": "create_quant_caps",
+        "axis": "axis_1_quant_caps",
+        "description": "Create a separate capabilities table (ggml_quant_caps) that higher-level code queries instead of hardcoding type checks. Does NOT modify the existing ggml_type_traits struct or the type_traits[] array — zero conflict with upstream.",
+        "principle": "The existing ggml_type_traits has quantization function pointers (to_float, from_float_ref). The NEW ggml_quant_caps has SEMANTIC capabilities (needs_wht, needs_deferred). Higher-level code uses caps for behavioral decisions. Adding a new quant type = adding 1 entry to the caps table.",
+        "files": {
+          "create": [
+            {
+              "path": "ggml/include/ggml-quant-caps.h",
+              "content": "#ifndef GGML_QUANT_CAPS_H\n#define GGML_QUANT_CAPS_H\n\n#include \"ggml.h\"\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\nstruct ggml_quant_caps {\n    bool     needs_wht;        // turbo2/3/4 + planar3/4 + iso3/4 — needs Hadamard rotation + head padding\n    bool     turbo_family;     // turbo2/3/4 only — participates in V adaptive modes 5/6/7\n    bool     needs_deferred;   // planar3/4 + iso3/4 — alloc F16 during prefill, convert post-prefill\n    bool     k_cache_capable;\n    bool     v_cache_capable;\n    bool     weight_capable;\n    bool     cpu_fallback_ok;  // true = can run on CPU if no GPU kernel (default true)\n    uint32_t head_align;       // 0=any, 128=WHT family\n};\n\nGGML_API const struct ggml_quant_caps * ggml_get_quant_caps(enum ggml_type type);\n\nstatic inline bool ggml_type_needs_wht(enum ggml_type type) {\n    return ggml_get_quant_caps(type)->needs_wht;\n}\nstatic inline bool ggml_type_needs_deferred(enum ggml_type type) {\n    return ggml_get_quant_caps(type)->needs_deferred;\n}\nstatic inline bool ggml_type_is_turbo_family(enum ggml_type type) {\n    return ggml_get_quant_caps(type)->turbo_family;\n}\nstatic inline uint32_t ggml_type_head_align(enum ggml_type type) {\n    return ggml_get_quant_caps(type)->head_align;\n}\n\n#ifdef __cplusplus\n}\n#endif\n#endif"
+            },
+            {
+              "path": "ggml/src/ggml-quant-caps.c",
+              "content": "#include \"ggml-quant-caps.h\"\n\nstatic const struct ggml_quant_caps quant_caps_table[GGML_TYPE_COUNT] = {\n    [GGML_TYPE_TURBO3_0] = {\n        .needs_wht = true, .turbo_family = true,\n        .k_cache_capable = true, .v_cache_capable = true,\n        .cpu_fallback_ok = true, .head_align = 128,\n    },\n    [GGML_TYPE_TURBO4_0] = {\n        .needs_wht = true, .turbo_family = true,\n        .k_cache_capable = true, .v_cache_capable = true,\n        .cpu_fallback_ok = true, .head_align = 128,\n    },\n    [GGML_TYPE_TURBO2_0] = {\n        .needs_wht = true, .turbo_family = true,\n        .k_cache_capable = true, .v_cache_capable = true,\n        .cpu_fallback_ok = true, .head_align = 128,\n    },\n    // Phase 8: uncomment planar/iso entries after porting implementations\n    // [GGML_TYPE_PLANAR3_0] = { .needs_wht=true, .needs_deferred=true, .k_cache_capable=true, .v_cache_capable=true, .head_align=128 },\n    // [GGML_TYPE_ISO3_0]    = { .needs_wht=true, .needs_deferred=true, .k_cache_capable=true, .v_cache_capable=true, .head_align=128 },\n    // [GGML_TYPE_PLANAR4_0] = { .needs_wht=true, .needs_deferred=true, .k_cache_capable=true, .v_cache_capable=true, .head_align=128 },\n    // [GGML_TYPE_ISO4_0]    = { .needs_wht=true, .needs_deferred=true, .k_cache_capable=true, .v_cache_capable=true, .head_align=128 },\n};\n\nconst struct ggml_quant_caps * ggml_get_quant_caps(enum ggml_type type) {\n    GGML_ASSERT(type >= 0 && type < GGML_TYPE_COUNT);\n    return &quant_caps_table[type];\n}"
+            }
+          ],
+          "modify": [
+            {
+              "path": "ggml/src/CMakeLists.txt",
+              "instruction": "Add ggml-quant-caps.c to the source list. Search for 'ggml-turbo-quant.c' and add after it.",
+              "search_for": "ggml-turbo-quant.c",
+              "append_after_match": "            ggml-quant-caps.c"
+            }
+          ]
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "ggml_get_quant_caps(GGML_TYPE_F16)->needs_wht == false",
+          "ggml_get_quant_caps(GGML_TYPE_TURBO3_0)->needs_wht == true",
+          "ggml_get_quant_caps(GGML_TYPE_TURBO3_0)->turbo_family == true"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 3,
+        "name": "backend_quant_registration",
+        "axis": "axis_2_gpu_prober",
+        "description": "Create a backend quant registration API so each backend declares which quant types it supports. At runtime, the scheduler queries this to decide whether to use GPU kernels or CPU fallback.",
+        "principle": "Currently CUDA fattn dispatch has 83 hardcoded type-specific cases. This phase creates a registration table so each quant module registers its own kernels. The fattn dispatch becomes a table lookup instead of a giant switch.",
+        "files": {
+          "create": [
+            {
+              "path": "ggml/include/ggml-backend-quant.h",
+              "content": "#ifndef GGML_BACKEND_QUANT_H\n#define GGML_BACKEND_QUANT_H\n\n#include \"ggml.h\"\n#include \"ggml-backend.h\"\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n// Per-backend quant operations. NULL fields = not supported natively.\n// If all fields are NULL, the type has no GPU kernel and falls back to CPU.\nstruct ggml_backend_quant_ops {\n    // Flash attention vector kernel (NULL = use CPU dequant fallback)\n    int (*fattn_vec)(struct ggml_context * ctx, struct ggml_tensor * q,\n                     struct ggml_tensor * k, struct ggml_tensor * v,\n                     struct ggml_tensor * dst, int32_t n_head, int32_t n_kv, float scale,\n                     float max_alibi_bias, int32_t n_logit_src);\n    // Row dequantization on device (NULL = use type_traits->to_float on CPU)\n    void (*dequantize_row)(const void * x, float * y, int64_t k);\n    // Row quantization on device (NULL = use type_traits->from_float_ref on CPU)\n    void (*quantize_row)(const float * x, void * y, int64_t nrows, int64_t n_per_row);\n};\n\n// Registration: called by each backend during init for each quant type it supports\nGGML_API void ggml_backend_register_quant_ops(\n    ggml_backend_dev_t           dev,\n    enum ggml_type               type,\n    const struct ggml_backend_quant_ops * ops);\n\n// Query: does this backend have native support for this quant type?\nGGML_API bool ggml_backend_supports_quant(\n    ggml_backend_dev_t dev,\n    enum ggml_type     type);\n\n// Get ops for a type on a device (NULL = not supported, use CPU fallback)\nGGML_API const struct ggml_backend_quant_ops * ggml_backend_get_quant_ops(\n    ggml_backend_dev_t dev,\n    enum ggml_type     type);\n\n#ifdef __cplusplus\n}\n#endif\n#endif"
+            },
+            {
+              "path": "ggml/src/ggml-backend-quant.c",
+              "content": "#include \"ggml-backend-quant.h\"\n#include <string.h>\n\n#define MAX_BACKENDS 16\n#define MAX_QUANT_OPS 64\n\nstruct backend_quant_entry {\n    ggml_backend_dev_t dev;\n    enum ggml_type type;\n    struct ggml_backend_quant_ops ops;\n};\n\nstatic struct backend_quant_entry registry[MAX_BACKENDS * MAX_QUANT_OPS];\nstatic int registry_count = 0;\n\nvoid ggml_backend_register_quant_ops(\n    ggml_backend_dev_t dev,\n    enum ggml_type type,\n    const struct ggml_backend_quant_ops * ops) {\n    if (registry_count >= MAX_BACKENDS * MAX_QUANT_OPS) return;\n    // Check for duplicate (same dev + type)\n    for (int i = 0; i < registry_count; i++) {\n        if (registry[i].dev == dev && registry[i].type == type) {\n            registry[i].ops = *ops;\n            return;\n        }\n    }\n    registry[registry_count].dev = dev;\n    registry[registry_count].type = type;\n    registry[registry_count].ops = ops ? *ops : (struct ggml_backend_quant_ops){0};\n    registry_count++;\n}\n\nbool ggml_backend_supports_quant(ggml_backend_dev_t dev, enum ggml_type type) {\n    for (int i = 0; i < registry_count; i++) {\n        if (registry[i].dev == dev && registry[i].type == type) {\n            return true;\n        }\n    }\n    return false;\n}\n\nconst struct ggml_backend_quant_ops * ggml_backend_get_quant_ops(\n    ggml_backend_dev_t dev, enum ggml_type type) {\n    for (int i = 0; i < registry_count; i++) {\n        if (registry[i].dev == dev && registry[i].type == type) {\n            return &registry[i].ops;\n        }\n    }\n    return NULL;\n}"
+            }
+          ],
+          "modify": [
+            {
+              "path": "ggml/src/CMakeLists.txt",
+              "instruction": "Add ggml-backend-quant.c to source list",
+              "search_for": "ggml-quant-caps.c",
+              "append_after_match": "            ggml-backend-quant.c"
+            }
+          ]
+        },
+        "cuda_registration_example": {
+          "description": "In ggml/src/ggml-cuda/fattn-turbo.cu (or existing turbo fattn file), add registration calls at init time. This replaces the hardcoded FATTN_VEC_CASES switch entries for turbo types.",
+          "code": "// At end of turbo fattn initialization:\n#include \"ggml-backend-quant.h\"\n\nstatic struct ggml_backend_quant_ops turbo3_cuda_ops = {\n    .fattn_vec = fattn_vec_turbo3_0_cuda,\n    .dequantize_row = dequantize_row_turbo3_0_cuda,\n};\n\n// Called during ggml_backend_cuda_init():\nggml_backend_register_quant_ops(cuda_dev, GGML_TYPE_TURBO3_0, &turbo3_cuda_ops);\nggml_backend_register_quant_ops(cuda_dev, GGML_TYPE_TURBO4_0, &turbo4_cuda_ops);\nggml_backend_register_quant_ops(cuda_dev, GGML_TYPE_TURBO2_0, &turbo2_cuda_ops);\n// NOTE: planar/iso types are NOT registered here — no CUDA kernel exists yet.\n// When planar CUDA kernels are written, add registration here."
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "ggml_backend_supports_quant(cuda_dev, GGML_TYPE_TURBO3_0) == true",
+          "ggml_backend_supports_quant(cuda_dev, GGML_TYPE_Q4_0) == true (upstream types already handled)",
+          "ggml_backend_supports_quant(cpu_dev, GGML_TYPE_F16) == true (all types supported on CPU via type_traits)"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 4,
+        "name": "cpu_fallback",
+        "axis": "axis_3_cpu_fallback",
+        "description": "When a quant type has no GPU kernel on the active backend, automatically fall back to CPU dequantization. The user doesn't need to know — it just works, slower.",
+        "principle": "The fallback is transparent. When the scheduler encounters a quantized tensor type that the backend doesn't support natively, it inserts a dequant→F32/F16 conversion node. The computation happens in F16 on GPU, then the result is requantized (for KV cache writes) or discarded (for attention reads).",
+        "mechanism": {
+          "step_1_detect": "At context creation (llama-context.cpp), check: ggml_backend_supports_quant(dev, params.type_k). If false and caps->cpu_fallback_ok, log a warning and set a flag 'k_cpu_fallback = true'.",
+          "step_2_prefill": "If k_cpu_fallback: allocate K as F16 (not quantized). After prefill, quantize on CPU using type_traits->from_float_ref. Upload quantized tensor to GPU. OR: keep K as F16 (simpler, uses more VRAM).",
+          "step_3_decode": "For each new K token during decode: compute in F32 on GPU, dequant existing K cache to F16 on CPU, upload F16 K to GPU, compute attention in F16, discard. This is the same path as the deferred allocation in Phase 9.",
+          "step_4_reporting": "At startup, print which quant types are GPU-accelerated and which use CPU fallback. Example: 'type_k=planar3_0: CPU fallback (no CUDA kernel), type_v=f16: native CUDA'."
+        },
+        "files": {
+          "modify": [
+            {
+              "path": "src/llama-context.cpp",
+              "instruction": "In llama_init_from_model(), after backend selection, add quant support check. Search for where type_k/type_v are validated and add the fallback detection.",
+              "code_to_add": "const auto * kcaps = ggml_get_quant_caps(params.type_k);\nif (kcaps->is_quantized && !ggml_backend_supports_quant(dev, params.type_k)) {\n    if (kcaps->cpu_fallback_ok) {\n        LLAMA_LOG_WARN(\"%s: type_k = %s uses CPU fallback (no GPU kernel on this backend)\\n\",\n            __func__, ggml_type_name(params.type_k));\n        // K cache will allocate as F16, quantize post-prefill on CPU\n    } else {\n        LLAMA_LOG_ERROR(\"%s: type_k = %s not supported on this backend and CPU fallback disabled\\n\",\n            __func__, ggml_type_name(params.type_k));\n        return nullptr;\n    }\n}"
+            }
+          ]
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "Build with CUDA only (no Vulkan). Load a model with -ctk f16 (native) — no warning.",
+          "Load with -ctk q8_0 — if CUDA supports q8_0, no warning. If not, see CPU fallback warning.",
+          "Build CPU-only. Load with -ctk turbo3_0 — see 'CPU fallback' warning, model still works (slower)."
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 5,
+        "name": "refactor_kv_cache_to_caps",
+        "axis": "axis_1_quant_caps",
+        "description": "Replace ALL hardcoded type checks in llama-kv-cache.cpp with ggml_quant_caps lookups. ONE-TIME refactor — after this, adding new quant types requires ZERO changes to kv-cache.cpp.",
+        "refactor_sites": [
+          { "id": "KV-1", "line_approx": 147, "semantic": "needs_wht", "search": "const bool k_is_turbo = (type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 || type_k == GGML_TYPE_TURBO2_0);", "replace": "const bool k_is_turbo = ggml_type_needs_wht(type_k);" },
+          { "id": "KV-2", "line_approx": 330, "semantic": "SPECIFIC_TYPE_STAYS", "search": "if (type_v == GGML_TYPE_TURBO2_0 && hparams.n_layer() >= 8)", "replace": "NO CHANGE — specific type trigger for Boundary V" },
+          { "id": "KV-3", "line_approx": 336, "semantic": "needs_wht", "search": "const bool is_turbo = (type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 || type_k == GGML_TYPE_TURBO2_0", "replace": "const bool is_turbo = ggml_type_needs_wht(type_k);" },
+          { "id": "KV-4", "line_approx": 337, "semantic": "turbo_family", "search": "const bool v_is_turbo = (type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0 || type_v == GGML_TYPE_TURBO2_0);", "replace": "const bool v_is_turbo = ggml_type_is_turbo_family(type_v);" },
+          { "id": "KV-5", "line_approx": 373, "semantic": "head_align", "search": "const bool k_is_turbo = (layer_type_k == GGML_TYPE_TURBO3_0 || ...);\\n        if (k_is_turbo && n_embd_head_k % 128 != 0)", "replace": "uint32_t k_align = ggml_type_head_align(layer_type_k);\\n        if (k_align > 0 && n_embd_head_k % k_align != 0)" },
+          { "id": "KV-6", "line_approx": 387, "semantic": "head_align", "search": "const bool v_is_turbo = (layer_type_v == GGML_TYPE_TURBO3_0 || ...);\\n        if (v_is_turbo && !is_mla && n_embd_head_v % 128 != 0)", "replace": "uint32_t v_align = ggml_type_head_align(layer_type_v);\\n        if (v_align > 0 && !is_mla && n_embd_head_v % v_align != 0)" },
+          { "id": "KV-7", "line_approx": 445, "semantic": "needs_wht", "search": "(type_k == GGML_TYPE_TURBO3_0 || type_k == GGML_TYPE_TURBO4_0 || type_k == GGML_TYPE_TURBO2_0))", "replace": "ggml_type_needs_wht(type_k))" },
+          { "id": "KV-8-11", "line_approx": "1518,1552,1592,1645", "semantic": "needs_wht", "pattern": "4 functions each with k->type or v->type turbo checks. Replace each (X->type == TURBO3 || X->type == TURBO4 || X->type == TURBO2) with ggml_type_needs_wht(X->type).", "replace_count": 8 }
+        ],
+        "include_to_add": "#include \"ggml-quant-caps.h\"",
+        "files": { "modify": [{ "path": "src/llama-kv-cache.cpp", "instruction": "Add #include at top. Apply all refactor sites in order KV-1 through KV-11. Sites marked NO CHANGE stay as-is." }] },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "grep -c 'GGML_TYPE_TURBO3_0.*GGML_TYPE_TURBO4_0.*GGML_TYPE_TURBO2_0' src/llama-kv-cache.cpp == 0",
+          "grep -c 'ggml_type_needs_wht\\|ggml_type_is_turbo_family\\|ggml_type_head_align\\|ggml_get_quant_caps' src/llama-kv-cache.cpp >= 10",
+          "build/bin/llama-cli -m <model> -p 'Hello' -n 10 -ctk turbo3_0 — works without crash"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 6,
+        "name": "refactor_graph_to_caps",
+        "axis": "axis_1_quant_caps",
+        "description": "Replace ALL 12 hardcoded type checks in llama-graph.cpp with caps lookups. All 12 sites are turbo-family-specific (rotation/attention), so use turbo_family predicate.",
+        "refactor_sites": [
+          { "id": "GR-1-2", "lines": [1089, 1125], "search": "if (w->type == GGML_TYPE_TURBO2_0 || w->type == GGML_TYPE_TURBO3_0 || w->type == GGML_TYPE_TURBO4_0)", "replace": "if (ggml_type_is_turbo_family(w->type))" },
+          { "id": "GR-3-4", "lines": [2117, 2195], "search": "if (v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0 || v->type == GGML_TYPE_TURBO2_0) {\\n    const bool k_is_turbo = (k->type == GGML_TYPE_TURBO3_0 || ...", "replace": "if (ggml_type_is_turbo_family(v->type)) {\\n    const bool k_is_turbo = ggml_type_is_turbo_family(k->type);" },
+          { "id": "GR-5-12", "lines": [2391, 2408, 2520, 2536, 2718, 2733], "pattern": "6 individual (k->type or v->type) == TURBO3 || TURBO4 || TURBO2 checks", "replace": "Replace each with ggml_type_is_turbo_family(X->type) where X is k or v" }
+        ],
+        "include_to_add": "#include \"ggml-quant-caps.h\"",
+        "files": { "modify": [{ "path": "src/llama-graph.cpp", "instruction": "Add #include at top. Apply all refactor sites." }] },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "grep -c 'GGML_TYPE_TURBO3_0.*GGML_TYPE_TURBO4_0.*GGML_TYPE_TURBO2_0' src/llama-graph.cpp == 0",
+          "grep -c 'ggml_type_is_turbo_family' src/llama-graph.cpp >= 12"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 7,
+        "name": "model_modularity",
+        "axis": "axis_4_model_modular",
+        "description": "Make model compilation selective. Currently 136 model files are all compiled. This phase adds CMake whitelist/blacklist so you build only what you need.",
+        "principle": "Model files (src/models/*.cpp) are independent compilation units. They register via a switch(arch) in llama-model.cpp. The CMake change globs the directory and filters. A runtime check provides a clear error if a model wasn't compiled.",
+        "files": {
+          "create": [
+            {
+              "path": "src/models/CMakeLists.txt",
+              "content": "# Model architecture compilation\noption(LLAMA_BUILD_ALL_MODELS \"Build all model architectures\" ON)\nset(LLAMA_MODEL_WHITELIST \"\" CACHE STRING \"Comma-separated model names (empty=all, e.g. 'gemma4,qwen3,phi3')\")\nset(LLAMA_MODEL_BLACKLIST \"\" CACHE STRING \"Comma-separated model names to exclude\")\n\nfile(GLOB MODEL_SOURCES CONFIGURE_DEPENDS \"${CMAKE_CURRENT_SOURCE_DIR}/*.cpp\")\n\n# Apply whitelist\nif(NOT LLAMA_BUILD_ALL_MODELS AND LLAMA_MODEL_WHITELIST)\n    string(REPLACE \",\" \";\" _whitelist \"${LLAMA_MODEL_WHITELIST}\")\n    set(_filtered)\n    foreach(_src ${MODEL_SOURCES})\n        get_filename_component(_name ${_src} NAME_WE)\n        if(_name IN_LIST _whitelist)\n            list(APPEND _filtered ${_src})\n        endif()\n    endforeach()\n    set(MODEL_SOURCES ${_filtered})\nendif()\n\n# Apply blacklist\nif(LLAMA_MODEL_BLACKLIST)\n    string(REPLACE \",\" \";\" _blacklist \"${LLAMA_MODEL_BLACKLIST}\")\n    foreach(_name ${_blacklist})\n        list(FILTER MODEL_SOURCES EXCLUDE REGEX \"${_name}\\\\.cpp$\")\n    endforeach()\nendif()\n\n# Generate compiled-archs list for runtime validation\nset(_compiled_archs \"\")\nforeach(_src ${MODEL_SOURCES})\n    get_filename_component(_name ${_src} NAME_WE)\n    list(APPEND _compiled_archs ${_name})\nendforeach()\nstring(REPLACE \";\" \",\" _compiled_archs_str \"${_compiled_archs}\")\nconfigure_file(${CMAKE_CURRENT_SOURCE_DIR}/compiled-archs.h.in ${CMAKE_CURRENT_SOURCE_DIR}/compiled-archs.h @ONLY)\n\n# Add to llama library target (assumes parent sets up the target)\nset(LLAMA_MODEL_SOURCES ${MODEL_SOURCES} PARENT_SCOPE)\nmessage(STATUS \"Models: ${_compiled_archs_str} (${MODEL_SOURCES_COUNT} files)\")"
+            },
+            {
+              "path": "src/models/compiled-archs.h.in",
+              "content": "// Auto-generated by CMake — do not edit\n#pragma once\n#define LLAMA_COMPILED_ARCHS \"@_compiled_archs_str@\"\n"
+            }
+          ],
+          "modify": [
+            {
+              "path": "src/CMakeLists.txt",
+              "instruction": "Replace the hardcoded model source list with the glob from models/CMakeLists.txt. Search for where model .cpp files are listed (likely a file(GLOB) or explicit list) and replace with include(src/models/CMakeLists.txt) or add_subdirectory(src/models)."
+            }
+          ]
+        },
+        "validation": [
+          "cmake -B build (default) compiles all 136 models",
+          "cmake -B build -DLLAMA_BUILD_ALL_MODELS=OFF -DLLAMA_MODEL_WHITELIST='gemma4,qwen3' compiles only 2 model files",
+          "cmake -B build -DLLAMA_MODEL_BLACKLIST='gemma4' compiles 135 models (excludes gemma4)",
+          "Loading a GGUF for an uncompiled arch produces error: 'model architecture X was not compiled into this build'"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 8,
+        "name": "port_planar_iso_quants",
+        "axis": "axis_1_quant_caps",
+        "description": "Port PlanarQuant (planar3/4) and IsoQuant (iso3/4) from llama-cpp-turboquant-merged. Thanks to caps + refactored kv-cache/graph, NO changes needed to kv-cache or graph — just quant files + caps entry + type_traits + dispatch.",
+        "source_repo": "/home/ethan/llama-cpp-turboquant-merged",
+        "steps_in_order": [
+          "1. Add 4 enum values to ggml/include/ggml.h (GGML_TYPE_PLANAR3_0=47, ISO3_0=48, PLANAR4_0=49, ISO4_0=50, increment GGML_TYPE_COUNT=51)",
+          "2. Add block structs + QK constants to ggml/src/ggml-common.h (copy from merged repo lines 349-392)",
+          "3. Copy 4 implementation files from merged repo: ggml-planar-quant.c, ggml-planar4-quant.c, ggml-iso-quant.c, ggml-iso4-quant.c → ggml/src/",
+          "4. Copy declarations from merged ggml-quants.h (planar/iso quantize/dequantize functions) → append to ggml/src/ggml-quants.h",
+          "5. Copy 4 type_traits[] entries from merged ggml.c (lines 792-823) → append to type_traits[] in ggml/src/ggml.c",
+          "6. Copy 4 quantize dispatch cases from merged ggml.c (lines 7869-7872) → append to quantize switch in ggml/src/ggml.c",
+          "7. Uncomment the 4 planar/iso entries in ggml/src/ggml-quant-caps.c",
+          "8. Add 4 .c files to ggml/src/CMakeLists.txt",
+          "9. Verify: grep -c 'GGML_TYPE_PLANAR' src/llama-kv-cache.cpp == 0 (zero changes needed — caps-driven!)"
+        ],
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "ggml_get_quant_caps(GGML_TYPE_PLANAR3_0)->needs_deferred == true",
+          "grep -c 'GGML_TYPE_PLANAR3_0' src/llama-kv-cache.cpp == 0"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 9,
+        "name": "port_deferred_allocation",
+        "axis": "axis_1_quant_caps",
+        "description": "Port the deferred F16→quant K-cache allocation and convert_deferred_keys(). Now fully data-driven by caps->needs_deferred.",
+        "source_repo": "/home/ethan/llama-cpp-turboquant-merged",
+        "files": {
+          "modify": [
+            {
+              "path": "src/llama-kv-cache.h",
+              "instruction": "Add 4 fields to kv_layer struct (if not present): k_quant (ggml_tensor*), k_quant_stream (vector), target_type_k (ggml_type), k_needs_convert (bool). Add method declaration: bool convert_deferred_keys();"
+            },
+            {
+              "path": "src/llama-kv-cache.cpp",
+              "instruction": "In constructor: before 'ggml_tensor * k = ...', add deferred block using 'const bool k_is_deferred = ggml_type_needs_deferred(layer_type_k);'. After k_stream/v_stream loop, add k_quant_stream views. After layers.push_back, add layer field setup. At end of file, append convert_deferred_keys() implementation (copy from merged repo lines 2858-2914)."
+            }
+          ]
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "grep -c 'k_is_deferred' src/llama-kv-cache.cpp >= 3",
+          "Functional: load model with -ctk planar3_0, verify prefill + convert works"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 10,
+        "name": "port_hrm_hidden_state",
+        "axis": "none",
+        "description": "Port HRM (Hierarchical Recurrent Model) architecture support, hidden state extraction API, and MTP drafter integration. HRM combines attention layers with recurrent state for efficient long-context reasoning. The hidden state API exposes post-final-norm features so a drafter model can speculate without recomputing the full forward pass.",
+        "source_repo": "/home/ethan/llama-cpp-turboquant-merged",
+        "source_files": [
+          "src/models/hrm-text.cpp (205 lines — HRM-Text graph builder)",
+          "src/models/hrm-text-moe.cpp (291 lines — HRM MoE variant)",
+          "src/llama-memory-recurrent.h (191 lines — recurrent state interface)",
+          "src/llama-memory-recurrent.cpp (1262 lines — recurrent state implementation)"
+        ],
+        "existing_infrastructure": {
+          "memory_interface": "llama_memory_i has layer_filter_cb, layer_reuse_cb, layer_share_cb callbacks (src/llama-memory.h:82-90). The share callback enables KV-cache sharing between target and drafter contexts.",
+          "context_sharing": "llama_context_params has ctx_other field (include/llama.h:396) for linking a drafter to a target context.",
+          "gemma4_reference": "src/models/gemma4.cpp:409-412 already exposes post-output-norm hidden state for MTP drafter feeding. This is the reference pattern to generalize.",
+          "recurrent_models": "Mamba (src/models/mamba-base.cpp) and RWKV6/7 already use llama_memory_recurrent. HRM extends this pattern."
+        },
+        "files": {
+          "create": [
+            {
+              "path": "src/models/hrm-text.cpp",
+              "source": "Copy from llama-cpp-turboquant-merged/src/models/hrm-text.cpp",
+              "description": "HRM-Text model graph builder. Implements build_graph() for the HRM architecture — hybrid attention + recurrent layers. Registers as LLM_ARCH_HRM."
+            },
+            {
+              "path": "src/models/hrm-text-moe.cpp",
+              "source": "Copy from llama-cpp-turboquant-merged/src/models/hrm-text-moe.cpp",
+              "description": "HRM MoE variant — mixture-of-experts HRM with shared recurrent state across expert branches."
+            },
+            {
+              "path": "src/llama-memory-recurrent.h",
+              "source": "Copy from llama-cpp-turboquant-merged/src/llama-memory-recurrent.h",
+              "description": "Recurrent memory interface — manages recurrent state (SSM/RNN hidden states) alongside KV cache. Extended for HRM's hierarchical state structure."
+            },
+            {
+              "path": "src/llama-memory-recurrent.cpp",
+              "source": "Copy from llama-cpp-turboquant-merged/src/llama-memory-recurrent.cpp",
+              "description": "Recurrent memory implementation — state checkpointing, rollback, seq_cp/seq_rm for recurrent states."
+            }
+          ],
+          "modify": [
+            {
+              "path": "src/llama-arch.h",
+              "instruction": "Add LLM_ARCH_HRM and LLM_ARCH_HRM_MOE to the arch enum (append before LLM_ARCH_UNKNOWN). Add arch name strings to the arch_name_map array.",
+              "entries_to_add": "LLM_ARCH_HRM, LLM_ARCH_HRM_MOE — with tensor name mappings for HRM-specific tensors (recurrent state, hierarchy gates, etc.)"
+            },
+            {
+              "path": "src/llama-model.cpp",
+              "instruction": "Add HRM model registry entries — map LLM_ARCH_HRM to the hrm-text graph builder, LLM_ARCH_HRM_MOE to hrm-text-moe builder. Add to the model dispatch switch.",
+              "search_for": "case LLM_ARCH_GEMMA4",
+              "add_after": "case LLM_ARCH_HRM: build_graph_hrm_text(); break;"
+            },
+            {
+              "path": "src/models/CMakeLists.txt",
+              "instruction": "Add hrm-text.cpp and hrm-text-moe.cpp to the model source list (or they're auto-globbed if Phase 7 is complete)."
+            },
+            {
+              "path": "include/llama.h",
+              "instruction": "Add hidden state API declarations. These let a caller extract the post-final-norm hidden state from a target context and feed it to a drafter context for MTP speculative decoding.",
+              "code_to_add": "// Hidden state API for MTP drafter integration\n// The hidden state is the post-final-norm output (LM-head input feature).\n// This allows a drafter model to speculate without recomputing the full forward pass.\n\nstruct llama_hidden_state {\n    const float * data;    // pointer to hidden state tensor data (owned by context)\n    int32_t n_tokens;      // number of tokens in this state\n    int32_t n_embd;        // embedding dimension\n    int32_t n_layer;       // source layer (typically final = n_layer - 1)\n};\n\n// Get the hidden state from the last forward pass.\n// Returns NULL if the model doesn't expose hidden states.\nGGML_API struct llama_hidden_state * llama_get_hidden_state(struct llama_context * ctx);\n\n// Feed hidden state to a drafter context (for MTP speculative decoding).\n// The drafter uses this as input instead of token embeddings for the first N tokens.\n// Returns number of tokens successfully fed (0 on error).\nGGML_API int32_t llama_feed_hidden_state(\n        struct llama_context           * ctx_drafter,\n        const struct llama_hidden_state * state,\n        int32_t                         n_tokens);\n\n// Free a hidden state handle (does not free the underlying data — owned by context)\nGGML_API void llama_hidden_state_free(struct llama_hidden_state * state);"
+            },
+            {
+              "path": "src/llama-context.cpp",
+              "instruction": "Implement llama_get_hidden_state() and llama_feed_hidden_state(). The get function extracts the post-output-norm tensor from the last computed graph. The feed function injects it as the input embedding for the drafter's first decode step.",
+              "get_implementation": "llama_get_hidden_state extracts the tensor at the output-norm layer (same as gemma4.cpp:409-412 pattern). Allocates a llama_hidden_state struct pointing to the tensor data. No copy — pointer aliasing into the context's compute buffer.",
+              "feed_implementation": "llama_feed_hidden_state sets the drafter's input embedding pointer to the provided state data. The drafter skips token embedding lookup for those tokens and uses the hidden state directly."
+            },
+            {
+              "path": "src/llama-kv-cache.h",
+              "instruction": "Ensure the kv_layer struct and kv_cache constructor support the layer_share_cb callback (already present in merged repo but may not be in the base fork). The share callback enables a drafter KV cache to share layers with the target cache, avoiding duplicate storage.",
+              "check_for": "layer_share_cb in llama_memory_i, mem_other parameter in kv_cache constructor, other pointer for shared cells"
+            }
+          ]
+        },
+        "arch_enum_entries": {
+          "LLM_ARCH_HRM": {
+            "tensors": ["blk.{l}.attn_q.weight", "blk.{l}.attn_k.weight", "blk.{l}.attn_v.weight", "blk.{l}.attn_output.weight", "blk.{l}.ffn_gate.weight", "blk.{l}.ffn_up.weight", "blk.{l}.ffn_down.weight", "blk.{l}.recurrent_state.weight"],
+            "hyperparams": "n_recurrent_layers, n_attention_layers, recurrence_stride"
+          },
+          "LLM_ARCH_HRM_MOE": {
+            "tensors": "same as HRM + blk.{l}.ffn_gate_inp.weight (expert routing), blk.{e}.ffn_gate.weight, blk.{e}.ffn_up.weight, blk.{e}.ffn_down.weight",
+            "hyperparams": "n_expert, n_expert_used, shared_recurrent_state"
+          }
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "HRM model loads: build/bin/llama-cli -m hrm-model.gguf -p 'Hello' -n 10 exits 0",
+          "Hidden state extraction: llama_get_hidden_state returns non-NULL after llama_decode()",
+          "Drafter feeding: llama_feed_hidden_state to a drafter context produces valid token output",
+          "Recurrent state persists across llama_decode calls (seq_cp, seq_rm work on recurrent memory)"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 11,
+        "name": "port_weight_compression",
+        "axis": "axis_1_quant_caps",
+        "description": "Port weight compression quantization types (TQ3_1S, TQ4_1S) and supporting tooling. These are weight-only quants (not KV-cache) that use WHT rotation for improved quality. Also port the layer-adaptive quantization system and imatrix integration for quality-aware weight quantization.",
+        "source_repo": "/home/ethan/llama-cpp-turboquant-merged",
+        "existing_in_base_fork": {
+          "enum": "GGML_TYPE_TQ3_1S, GGML_TYPE_TQ4_1S already in ggml.h",
+          "blocks": "block_tq3_1s, block_tq4_1s already in ggml-common.h",
+          "implementations": "ggml-turbo-quant.c already has quantize_row_tq3_1s_ref etc.",
+          "ftypes": "LLAMA_FTYPE_MOSTLY_TQ1_0=36, TQ2_0=37, TQ3_1S=43, TQ4_1S=44 already in llama.h",
+          "quantize_tool": "tools/quantize/quantize.cpp already lists TQ3_1S and TQ4_1S (lines 50-51)",
+          "type_traits": "type_traits[] entries for TQ3_1S and TQ4_1S already exist in ggml.c"
+        },
+        "what_needs_porting": [
+          "Layer-adaptive weight quantization: the TURBO_LAYER_ADAPTIVE env var system that assigns different quant types to different layer ranges (boundary layers get higher precision)",
+          "imatrix-r integration: importance-matrix-aware weight quantization for better quality (tools/quantize/imatrix-r-convert.cpp, imatrix-r-verify.cpp)",
+          "GGUF ftype entries for planar/iso weight quants (if weight versions of planar/iso are added later)",
+          "Verify: weight quant round-trip (quantize GGUF → load → perplexity check)"
+        ],
+        "files": {
+          "create": [
+            {
+              "path": "tools/quantize/imatrix-r-convert.cpp",
+              "source": "Port from llama-cpp-turboquant-feature-turboquant-kv-cache/tools/quantize/imatrix-r-convert.cpp (untracked file)",
+              "description": "Converts an importance matrix to the rotated (R) format used by WHT-based weight quants. The imatrix guides which weight blocks get higher precision."
+            },
+            {
+              "path": "tools/quantize/imatrix-r-verify.cpp",
+              "source": "Port from llama-cpp-turboquant-feature-turboquant-kv-cache/tools/quantize/imatrix-r-verify.cpp (untracked file)",
+              "description": "Verifies that an R-format imatrix is correctly formatted and aligned with the model's layer structure."
+            }
+          ],
+          "modify": [
+            {
+              "path": "tools/quantize/CMakeLists.txt",
+              "instruction": "Add imatrix-r-convert and imatrix-r-verify as build targets. Search for existing quantize tool target and add alongside.",
+              "targets_to_add": "add_executable(llama-imatrix-r-convert imatrix-r-convert.cpp)\\nadd_executable(llama-imatrix-r-verify imatrix-r-verify.cpp)\\ntarget_link_libraries(llama-imatrix-r-convert PRIVATE llama llama-common)"
+            },
+            {
+              "path": "tools/quantize/quantize.cpp",
+              "instruction": "Ensure the quantize tool supports layer-adaptive mode. When TURBO_LAYER_ADAPTIVE is set, the quantize tool should assign different ggml_type per layer based on the adaptive strategy. Verify the existing TQ3_1S/TQ4_1S entries work end-to-end.",
+              "check": "grep -c 'TQ3_1S\\|TQ4_1S' tools/quantize/quantize.cpp >= 2"
+            },
+            {
+              "path": "ggml/src/ggml.c",
+              "instruction": "Verify TQ3_1S and TQ4_1S have complete type_traits entries (to_float, from_float_ref, blck_size, type_size, is_quantized). Verify quantize dispatch cases exist. If missing, append them using the pattern from existing turbo entries.",
+              "check": "grep 'GGML_TYPE_TQ3_1S' ggml/src/ggml.c should show both type_traits entry AND dispatch case"
+            },
+            {
+              "path": "ggml/src/ggml-quant-caps.c",
+              "instruction": "Add caps entries for TQ3_1S and TQ4_1S if they have special behavioral properties. These are WEIGHT quants — they likely don't need needs_wht or needs_deferred (those are KV-cache properties). But they may need weight_capable=true.",
+              "entries_to_add": "[GGML_TYPE_TQ3_1S] = { .weight_capable = true, .cpu_fallback_ok = true },\\n[GGML_TYPE_TQ4_1S] = { .weight_capable = true, .cpu_fallback_ok = true },"
+            }
+          ]
+        },
+        "layer_adaptive_system": {
+          "description": "The TURBO_LAYER_ADAPTIVE env var controls per-layer quant type assignment during KV-cache construction. For weight quantization, a similar system assigns different weight quants per layer range (boundary layers get higher precision, middle layers get more compression).",
+          "env_var": "TURBO_LAYER_ADAPTIVE",
+          "modes": {
+            "0": "disabled — all layers use the same quant type",
+            "1": "boundary layers (first 4 + last 4) get Q8_0, rest get target type",
+            "2": "last 8 layers get Q8_0, rest get target type",
+            "5": "V-only: boundary layers get turbo4, rest get turbo2",
+            "6": "V-only: last 8 get turbo4, rest get turbo2",
+            "7": "V-only: boundary get Q8_0, rest get turbo2 (recommended)"
+          },
+          "for_weights": "When quantizing model weights via the quantize tool, the same adaptive logic applies — boundary layers (which have outsized impact on output quality) get higher precision. This is already partially implemented in the kv-cache constructor; for weight quantization it needs to be applied in tools/quantize/quantize.cpp."
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "Quantize a test model: build/bin/llama-quantize --quantize-output-type TQ3_1S model.gguf model-tq3.gguf",
+          "Load quantized model: build/bin/llama-cli -m model-tq3.gguf -p 'Hello' -n 10 exits 0",
+          "Perplexity check: build/bin/llama-perplexity -m model-tq3.gguf exits with PPL within 5% of F16 baseline",
+          "Layer-adaptive: TURBO_LAYER_ADAPTIVE=1 quantize tool assigns Q8_0 to boundary layers",
+          "imatrix: build/bin/llama-imatrix-r-convert produces valid R-format imatrix"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 12,
+        "name": "port_stability_modules",
+        "axis": "none",
+        "description": "Port stability validation tooling AND quantization calibration system. The stability suite (PPL, KL divergence, round-trip) validates quant quality. The calibration suite (ported from ncnn's ncnn2table methodology) computes optimal activation scales to improve quantized model quality. This is the tool that makes PTQ quantization approach QAT quality.",
+        "source_repo": "/home/ethan/llama-cpp-turboquant-merged",
+        "ncnn_reference": "https://github.com/Tencent/ncnn/blob/master/tools/quantize/ncnn2table.cpp — 2251 lines, 3 calibration algorithms",
+        "existing_in_base_fork": {
+          "perplexity_tool": "tools/perplexity/perplexity.cpp + main.cpp already exist",
+          "llama_bench": "tools/llama-bench or examples/llama-bench may exist"
+        },
+        "what_needs_porting": [
+          "STABILITY: KL divergence measurement between quantized and reference model logits",
+          "STABILITY: Round-trip verification (quantize → dequantize → compare)",
+          "STABILITY: PPL+KLD test harness across model families",
+          "CALIBRATION: KL entropy calibrator (3-pass histogram → 128-bin fold → threshold sweep) — ncnn's default, highest accuracy",
+          "CALIBRATION: ACIQ analytic calibrator (single-pass Gaussian clip) — fast runtime recalibration",
+          "CALIBRATION: EQ cosine-similarity refinement (grid-search per-layer scales to maximize output cosine similarity) — accuracy maximizer",
+          "CALIBRATION: Activation scale table format (analogous to ncnn's .table but for GGUF per-layer per-tensor scales)",
+          "CALIBRATION: KV-cache activation calibrator (novel — ncnn doesn't calibrate KV; we extend the histogram/KL machinery to KV tensor collections)",
+          "CALIBRATION: Requantize fusion for chained quantized matmuls (propagate output scale = next layer input scale)"
+        ],
+        "files": {
+          "create": [
+            {
+              "path": "tools/stability/kl_divergence.h",
+              "description": "KL divergence computation between two logit distributions.",
+              "content_template": "#pragma once\n#include <vector>\n#include <cstdint>\n\n// Compute KL divergence D_KL(P || Q) between two logit distributions.\n// P = reference (typically F16 model), Q = quantized model.\n// Returns divergence in nats. Lower = better quantization quality.\ndouble kl_divergence(\n    const float * logits_ref,   // reference model logits [n_vocab]\n    const float * logits_quant, // quantized model logits [n_vocab]\n    int n_vocab);\n\n// Batch KL divergence: compute average KL across a sequence of token positions.\nstruct kl_result {\n    double mean_kl;\n    double max_kl;\n    double p95_kl;\n    int    n_tokens;\n};\n\nstruct kl_result kl_divergence_batch(\n    const float * logits_ref,   // [n_tokens, n_vocab]\n    const float * logits_quant, // [n_tokens, n_vocab]\n    int n_tokens,\n    int n_vocab);"
+            },
+            {
+              "path": "tools/stability/kl_divergence.cpp",
+              "description": "Implementation. Uses softmax normalization then element-wise KL formula. Handles temperature smoothing for numerical stability.",
+              "content_template": "#include \"kl_divergence.h\"\n#include <cmath>\n#include <algorithm>\n\nstatic void softmax(float * probs, const float * logits, int n) {\n    float max_val = *std::max_element(logits, logits + n);\n    float sum = 0.0f;\n    for (int i = 0; i < n; i++) {\n        probs[i] = expf(logits[i] - max_val);\n        sum += probs[i];\n    }\n    float inv_sum = 1.0f / sum;\n    for (int i = 0; i < n; i++) probs[i] *= inv_sum;\n}\n\ndouble kl_divergence(const float * ref, const float * quant, int n) {\n    std::vector<float> p(n), q(n);\n    softmax(p.data(), ref, n);\n    softmax(q.data(), quant, n);\n    double kl = 0.0;\n    for (int i = 0; i < n; i++) {\n        if (p[i] > 1e-12f && q[i] > 1e-12f) {\n            kl += p[i] * log(p[i] / q[i]);\n        }\n    }\n    return kl;\n}"
+            },
+            {
+              "path": "tools/stability/round_trip.h",
+              "description": "Quantization round-trip verification: quantize a weight tensor to a target type, dequantize back to F32, measure the reconstruction error.",
+              "content_template": "#pragma once\n#include \"ggml.h\"\n\nstruct round_trip_result {\n    double max_error;    // max absolute error between original and round-tripped\n    double mean_error;   // mean absolute error\n    double rms_error;    // root-mean-square error\n    double cos_sim;      // cosine similarity (1.0 = perfect)\n};\n\nstruct round_trip_result round_trip_test(\n    const float * weights,       // original F32 weights\n    int64_t n_elements,\n    enum ggml_type target_type); // quant type to test"
+            },
+            {
+              "path": "tools/stability/stability_runner.cpp",
+              "description": "Main test harness. Loads a reference model (F16) and a quantized model, runs the same prompt through both, compares PPL and KL divergence. Outputs a stability report.",
+              "content_template": "// Usage: stability-runner --ref model-f16.gguf --quant model-q4.gguf --prompt test.txt\n//\n// Output:\n//   Reference PPL:  8.234\n//   Quantized PPL:  8.291 (+0.69%)\n//   Mean KL: 0.0234 nats\n//   Max KL:  0.0891 nats (at token 234)\n//   P95 KL:  0.0456 nats\n//   Round-trip cos_sim: 0.9987\n//   Verdict: PASS (PPL delta < 5%, KL < 0.1)"
+            },
+            {
+              "path": "tools/stability/CMakeLists.txt",
+              "content": "add_executable(llama-stability-runner\n    stability_runner.cpp\n    kl_divergence.cpp\n    round_trip.cpp\n)\ntarget_link_libraries(llama-stability-runner PRIVATE llama llama-common)\ninstall(TARGETS llama-stability-runner RUNTIME DESTINATION bin)\n\nadd_executable(llama-calibrate\n    calibrator.cpp\n    aciq.cpp\n    kl_entropy.cpp\n    eq_refine.cpp\n    scale_table.cpp\n)\ntarget_link_libraries(llama-calibrate PRIVATE llama llama-common)\ninstall(TARGETS llama-calibrate RUNTIME DESTINATION bin)"
+            },
+            {
+              "path": "tools/stability/calibrator.h",
+              "description": "Core calibration API. Defines the calibration flow: collect activations from calibration data → compute scales → write scale table → optionally refine. Three algorithm choices mirror ncnn's ncnn2table -method flag.",
+              "content_template": "#pragma once\n#include \"ggml.h\"\n#include <string>\n#include <vector>\n#include <unordered_map>\n\n// ============= Scale Table Format =============\n// Analogous to ncnn's .table but adapted for GGUF/llama.cpp tensor naming.\n//\n// File format (plain text, one entry per line):\n//   blk.{l}.attn_q.weight  0.00234    # per-output-channel weight scale (per-row for matrices)\n//   blk.{l}.attn_q.input   1.45670    # per-tensor activation scale for Q projection input\n//   blk.{l}.attn_k.weight  0.00198\n//   blk.{l}.attn_k.input   1.32100\n//   ...\n//   blk.{l}.ffn_down.weight 0.00421\n//   blk.{l}.ffn_down.input  2.10900\n//\n// Lines with .weight suffix = weight scales (per-channel dim).\n// Lines with .input suffix = activation scales (per-tensor scalar).\n// Missing lines = use default (absmax) quantization for that tensor.\n\nstruct calibration_scale_entry {\n    std::string tensor_name;    // e.g. 'blk.0.attn_q.weight'\n    std::string scale_type;     // 'weight' or 'activation'\n    std::vector<float> scales;  // per-channel for weight (1 element = per-tensor for activation)\n};\n\nstruct calibration_config {\n    enum method { KL_ENTROPY, ACIQ, EQ_REFINE } method = KL_ENTROPY;\n    int n_calibration_samples = 500;  // number of text samples for activation collection\n    int histogram_bins = 4096;        // KL entropy histogram resolution (ncnn uses 2048; we double for LLM heavy tails)\n    int target_bins = 128;            // fold target for KL entropy (ncnn uses 128)\n    float eq_search_min = 0.5f;       // EQ refinement: minimum scale multiplier\n    float eq_search_max = 2.0f;       // EQ refinement: maximum scale multiplier\n    int eq_grid_steps = 100;          // EQ refinement: grid search resolution\n    int eq_max_samples = 50;          // EQ refinement: images per layer for cosine similarity\n    bool calibrate_kv_cache = true;   // novel: calibrate KV activation ranges (ncnn doesn't do this)\n    bool fuse_requantize = true;      // propagate output scale = next layer input scale\n};\n\n// ============= calibrate_model =============\n//\n// Main orchestrator: turns a raw F16 model + calibration text into a scale table.\n//\n// Pipeline:\n//   1. Load F16 model into llama_context\n//   2. For each calibration sample (text line):\n//      a. Tokenize and llama_decode() through the model\n//      b. Extract intermediate activations per tensor:\n//         - attn_q/k/v input activations (pre-projection)\n//         - ffn_gate/up input activations (pre-projection)\n//         - KV cache tensor values (if calibrate_kv_cache=true)\n//      c. Accumulate absmax + histogram per tensor across all samples\n//   3. Compute scales using selected algorithm:\n//      - KL_ENTROPY: histogram fold + threshold sweep per tensor\n//      - ACIQ: analytic Gaussian clip per tensor (fast, 1-pass data already collected)\n//      - EQ_REFINE: seed from KL, then grid-search per-layer cosine similarity\n//   4. Optional: requantize fusion (propagate output_scale = next input_scale)\n//   5. Write scale table to output file\n//\n// Parameters:\n//   model_path:       path to F16 GGUF model (reference, unquantized)\n//   calibration_data: path to text file, one sample per line (prompts/sequences)\n//   output_table_path: output path for the .table scale file\n//   config:           algorithm choice, sample count, histogram bins, etc.\n//\n// Returns: 0 on success, negative on error\n//\n// Cost by method:\n//   KL_ENTROPY: ~3n forward passes (n = n_calibration_samples) + per-tensor sweep\n//   ACIQ:       ~n forward passes (single pass, absmax only)\n//   EQ_REFINE:  ~n + 100*n_layers forward passes (expensive, highest accuracy)\n//\n// Integration requirement: needs llama_decode() to expose intermediate activations.\n// Currently scaffolded — the activation extraction hooks need llama_context\n// callbacks or ggml graph interception to capture per-tensor values during forward.\n\nint calibrate_model(\n    const char * model_path,          // path to F16 GGUF model\n    const char * calibration_data,    // path to calibration text file (one sample per line)\n    const char * output_table_path,   // output: scale table file\n    const calibration_config & config);\n\n// ============= quantize_with_scales =============\n//\n// Consumes a calibration scale table during GGUF quantization, replacing\n// naive absmax with calibrated per-channel/per-tensor scales.\n//\n// Pipeline:\n//   1. Load GGUF model weights (F16 or F32)\n//   2. Load scale table (per-tensor activation + per-channel weight scales)\n//   3. For each weight tensor in the model:\n//      a. Look up calibrated scale by tensor name (e.g. 'blk.0.attn_q.weight')\n//      b. If found: use calibrated per-channel scale for quantization\n//         → produces tighter quantization (scales matched to activation distribution)\n//      c. If missing: fall back to default absmax scale (standard llama-quantize behavior)\n//      d. Quantize the weight tensor using ggml_quantize_chunk() with the selected scale\n//   4. Write quantized GGUF with embedded per-channel scales\n//\n// Effect: the quantized model's weight blocks use calibrated scales that account\n// for the activation distribution observed during calibration. This typically\n// improves PPL by 2-5% vs naive absmax quantization.\n//\n// Parameters:\n//   model_path:  path to input F16/F32 GGUF model\n//   table_path:  path to calibration scale table (from calibrate_model)\n//   output_path: path to output quantized GGUF\n//   target_type: ggml quantization type (e.g. GGML_TYPE_Q4_K, GGML_TYPE_Q4_0)\n//\n// Returns: 0 on success, negative on error\n//\n// Integration requirement: needs llama-quantize internals to accept per-channel\n// scales instead of computing absmax. The ggml_quantize_chunk() function already\n// accepts an imatrix parameter for importance-weighted quantization — the scale\n// table plugs into the same path.\n\nint quantize_with_scales(\n    const char * model_path,          // input F16 GGUF\n    const char * table_path,          // calibration scale table\n    const char * output_path,         // output quantized GGUF\n    enum ggml_type target_type);      // e.g. GGML_TYPE_Q4_K, GGML_TYPE_Q4_0"
+            },
+            {
+              "path": "tools/stability/kl_entropy.cpp",
+              "description": "KL entropy calibration — ncnn's default method (ncnn2table.cpp:604). Three-pass algorithm: (1) global absmax per activation tensor, (2) 2048-bin histogram, (3) threshold sweep with partial-bin linear interpolation. For each candidate threshold in [128, 2048], fold the clipped distribution into 128 bins, expand back, compute KL divergence, keep the minimizing threshold. Produces per-tensor activation scale = 127/best_threshold. Port from ncnn's quantize_KL function.",
+              "ncnn_reference": "ncnn2table.cpp lines 604-1160: quantize_KL() function. The histogram fold logic (lines 1004-1070) is the core innovation — partial-bin linear interpolation when collapsing 2048 bins to 128.",
+              "llama_adaptation": "Replace ncnn's conv_bottom_blobs with llama.cpp matmul input tensors (blk.{l}.attn_q.input, blk.{l}.ffn_gate.input, etc.). Activation collection uses llama_decode() with calibration prompts. Per-layer histograms stored per tensor name. LLM activations have heavier tails than CNN — consider 4096 bins instead of 2048 for better outlier modeling.",
+              "content_template": "// KL Entropy Calibration (ported from ncnn ncnn2table.cpp:604)\n//\n// Pass 1: Forward calibration data through F16 model, collect |x| absmax per tensor\n// Pass 2: Forward again, build 2048-bin histogram per tensor over [0, absmax]\n// Pass 3: For each tensor, sweep threshold [128..2048]:\n//   - Fold bins above threshold into bin 128 (partial-bin linear interpolation)\n//   - Expand back to threshold bins\n//   - Compute KL(folded || expanded)\n//   - Keep threshold with minimum KL\n// Final scale = 127 / (best_bin + 0.5) * absmax / 2048\n\nfloat compute_kl_threshold(\n    const uint64_t histogram[],   // [histogram_bins]\n    int histogram_bins,           // typically 2048\n    int target_bins);             // typically 128"
+            },
+            {
+              "path": "tools/stability/aciq.cpp",
+              "description": "ACIQ (Analytic Clipping for Integer Quantization) — ncnn's fast method (ncnn2table.cpp:1206). Single-pass closed-form Gaussian clip. No histogram needed. Computes clip threshold from absmax + element count using the ACIQ alpha constant. Ideal for runtime recalibration when quantized model drifts.",
+              "ncnn_reference": "ncnn2table.cpp lines 1206-1500: quantize_ACIQ() function. Formula: gaussian_const = 0.5*0.35*(1+sqrt(pi*ln4)), std = absmax*2*gaussian_const/sqrt(2*ln(N)), clip = alpha[7]*std = 3.92403714*std for int8.",
+              "llama_adaptation": "Useful as a fast stability check during inference — if ACIQ-computed scales drift >10% from the calibration-time scales, trigger recalibration. The alpha constant for 4-bit quant (alpha[3]=1.185) differs from int8 — add a lookup table for all ggml quant types.",
+              "content_template": "// ACIQ Analytic Calibration (ported from ncnn ncnn2table.cpp:1206)\n//\n// Single-pass, no histogram, no threshold sweep.\n// For a given activation tensor with N elements and absmax A:\n//   gaussian_const = 0.5 * 0.35 * (1 + sqrt(pi * ln(4)))\n//   std = A * 2 * gaussian_const / sqrt(2 * ln(N))\n//   clip_threshold = alpha[n_bits] * std\n//   scale = (2^(n_bits-1) - 1) / clip_threshold\n//\n// alpha constants (from ACIQ paper, ncnn hardcoded):\n//   int8: alpha = 3.92403714\n//   int4: alpha = 1.185\n//   int2: alpha = 0.650\n\nstatic const float aciq_alpha[] = {\n    0.0f,    // unused (0-bit)\n    0.0f,    // unused (1-bit)\n    0.650f,  // 2-bit\n    0.900f,  // 3-bit\n    1.185f,  // 4-bit\n    1.450f,  // 5-bit\n    1.700f,  // 6-bit\n    1.850f,  // 7-bit\n    3.92403714f,  // 8-bit\n};\n\nfloat compute_aciq_scale(float absmax, int64_t n_elements, int n_bits) {\n    const float gaussian_const = 0.5f * 0.35f * (1.0f + sqrtf(M_PI * logf(4.0f)));\n    float std_dev = absmax * 2.0f * gaussian_const / sqrtf(2.0f * logf((float)n_elements));\n    float clip = aciq_alpha[n_bits] * std_dev;\n    return ((1 << (n_bits - 1)) - 1) / clip;\n}"
+            },
+            {
+              "path": "tools/stability/eq_refine.cpp",
+              "description": "EQ (Entropy-aware Quantization) refinement — ncnn's accuracy maximizer (ncnn2table.cpp:1501). Seeds with KL or ACIQ scales, then grid-searches each per-layer scale to maximize cosine similarity between fp32 and quantized layer output. This is the calibration loop that gets closest to QAT quality.",
+              "ncnn_reference": "ncnn2table.cpp lines 1501-1700: quantize_EQ() function. For each weight-scale channel and each activation scale, grid-search 100 steps over [0.5*scale, 2.0*scale], forward through standalone int8 layer, compare to fp32 reference, pick argmax cosine similarity.",
+              "llama_adaptation": "Replace ncnn's standalone layer forward with llama.cpp's ggml_graph_compute with a single-layer subgraph. Measure cosine similarity between F16 and quantized output for each transformer layer independently. This is expensive (100 forwards per layer) but produces the highest-quality calibration.",
+              "content_template": "// EQ Cosine Similarity Refinement (ported from ncnn ncnn2table.cpp:1501)\n//\n// For each transformer layer l:\n//   1. Forward calibration data through F16 model, capture reference output O_ref[l]\n//   2. For each candidate scale s in [0.5*s0, 2.0*s0] (100 grid steps):\n//      a. Quantize layer l weights with scale s\n//      b. Forward same input through quantized layer, capture O_quant[l]\n//      c. Compute cosine_similarity(O_ref[l], O_quant[l])\n//   3. Pick s_best = argmax cosine_similarity\n//   4. Write s_best to scale table\n//\n// Cost: ~100 forward passes per layer. For 32-layer model: ~3200 forwards.\n// Use 50 calibration samples (not full dataset) — sufficient for stable estimates.\n\nfloat refine_layer_scale(\n    const float * ref_output,        // F16 layer output [n_tokens, n_embd]\n    const float * quant_output,      // quantized layer output [n_tokens, n_embd]\n    int n_elements,\n    float current_scale,\n    float search_min = 0.5f,\n    float search_max = 2.0f,\n    int grid_steps = 100);"
+            },
+            {
+              "path": "tools/stability/scale_table.cpp",
+              "description": "Scale table serialization — read/write the calibration .table file. Analogous to ncnn's table format but using llama.cpp tensor naming conventions.",
+              "content_template": "// Scale Table I/O\n//\n// Read: parse .table file into map<tensor_name, vector<float>>\n// Write: serialize map to .table file\n//\n// Format: one entry per line\n//   <tensor_name> <scale_type> <scale_value_0> [<scale_value_1> ...]\n//\n// Example:\n//   blk.0.attn_q.weight weight 0.00234 0.00210 0.00256 ...\n//   blk.0.attn_q.input  activation 1.45670\n//   blk.0.attn_k.weight weight 0.00198 0.00176 ...\n//   blk.0.attn_k.input  activation 1.32100\n\nint write_scale_table(\n    const char * path,\n    const std::vector<calibration_scale_entry> & entries);\n\nstd::vector<calibration_scale_entry> read_scale_table(\n    const char * path);"
+            }
+          ],
+          "modify": [
+            {
+              "path": "tools/perplexity/perplexity.cpp",
+              "instruction": "Add KL divergence output mode. When run with --kl-reference <ref-model>, compute KL divergence between the reference and the model under test at each token position. Output mean/max/P95 KL alongside PPL.",
+              "flag_to_add": "--kl-reference <path> : compute KL divergence against this reference model"
+            }
+          ]
+        },
+        "test_matrix": {
+          "description": "The PPL+KLD test harness evaluates each quant type across model families. This validates that modular quant additions don't regress quality.",
+          "models_to_test": [
+            "gemma-4 31B (large, tests scaling)",
+            "gemma-4 26B-A4B (MoE, tests expert routing)",
+            "gemma-4 E2B (small edge model)",
+            "Qwen2.5-7B (mid-size)",
+            "Qwen3.5-2B (small)",
+            "Mistral-Small-24B",
+            "phi-4"
+          ],
+          "quant_types_to_test": [
+            "F16 (baseline)",
+            "Q8_0 (reference quant)",
+            "TURBO3_0 (3.5x compression)",
+            "TURBO4_0 (4x compression)",
+            "PLANAR3_0 (5x compression, deferred)",
+            "ISO4_0 (8x compression, deferred)",
+            "TQ3_1S (weight quant, 4.0 bpw)",
+            "TQ4_1S (weight quant, 5.0 bpw)"
+          ],
+          "metrics": [
+            "PPL (perplexity) — lower is better, delta from F16 baseline",
+            "KL divergence (mean, max, P95) — lower is better",
+            "Round-trip cosine similarity — higher is better (1.0 = perfect)",
+            "Tokens/sec — performance metric",
+            "TTFT (time to first token) — latency metric",
+            "VRAM usage — memory metric"
+          ],
+          "pass_criteria": {
+            "PPL_delta_percent": "< 10% from F16 baseline",
+            "KL_mean": "< 0.1 nats",
+            "cos_sim": "> 0.99"
+          }
+        },
+        "calibration_methodology": {
+          "source": "Tencent/ncnn ncnn2table.cpp — ported and adapted for LLM/GGUF",
+          "two_scale_model": {
+            "weight_scales": "Per-output-channel (per-row for weight matrices). Computed from static weight absmax — no calibration data needed. Already partially present in llama.cpp k-quants (per-block scales). The calibration tool computes optimal per-channel scales instead of per-block.",
+            "activation_scales": "Per-tensor scalar for each matmul input tensor (attn_q.input, attn_k.input, ffn_gate.input, etc.). Requires calibration data. This is the novel contribution — llama.cpp currently has no activation scale calibration. ncnn's methodology ports directly.",
+            "kv_cache_scales": "Novel — ncnn doesn't calibrate KV cache. We extend the histogram/KL machinery to KV tensor activations. Per-layer per-tensor KV scale, computed from collected K/V activation samples during calibration. Enables KV-cache quant types (turbo/planar/iso) to use calibrated scales instead of naive absmax."
+          },
+          "three_algorithms": {
+            "kl_entropy": {
+              "ncnn_reference": "ncnn2table.cpp:604, quantize_KL()",
+              "cost": "3 forward passes + per-tensor threshold sweep (fast)",
+              "accuracy": "Highest among the three. TensorRT-standard entropy calibration.",
+              "how_it_works": "Pass 1: collect absmax per tensor. Pass 2: build 2048-bin histogram. Pass 3: for each threshold candidate [128..2048], fold distribution into 128 bins via partial-bin linear interpolation, expand back, compute KL(folded || expanded), pick minimum. Scale = 127/threshold.",
+              "llama_adaptation": "Replace ncnn conv_bottom_blobs with llama matmul input tensors. Use 4096 bins (not 2048) — LLM activations have heavier tails than CNNs. Forward calibration data through llama_decode(), extract intermediate activations per layer."
+            },
+            "aciq": {
+              "ncnn_reference": "ncnn2table.cpp:1206, quantize_ACIQ()",
+              "cost": "1 forward pass (absmax + element count only)",
+              "accuracy": "Slightly lower than KL (~2-5% worse scale quality), but 3x faster to compute",
+              "how_it_works": "Closed-form Gaussian assumption: clip = alpha[n_bits] * absmax * gaussian_const / sqrt(2*ln(N)). No histogram, no threshold sweep. Alpha constants from the ACIQ paper.",
+              "llama_adaptation": "Ideal for runtime recalibration during inference. If the ACIQ-computed scale for the current batch drifts >10% from the calibration-time scale, trigger an online scale update. This is the stability monitor's fast path."
+            },
+            "eq_refine": {
+              "ncnn_reference": "ncnn2table.cpp:1501, quantize_EQ()",
+              "cost": "~100 forward passes per layer (expensive)",
+              "accuracy": "Highest overall. Grid-searches each scale to maximize output cosine similarity. Gets closest to QAT quality from pure PTQ.",
+              "how_it_works": "Seed with KL or ACIQ scales. For each layer: for each candidate scale in [0.5x, 2.0x] (100 steps), quantize that layer, forward 50 calibration samples, measure cosine similarity between F16 and quantized output. Pick argmax.",
+              "llama_adaptation": "The single most valuable calibration algorithm for our use case. Apply per-transformer-layer (not per-tensor). This recovers most of the quality gap between PTQ and QAT for turbo/planar/iso KV-cache quant types."
+            }
+          },
+          "requantize_fusion": {
+            "ncnn_reference": "ncnn2int8.cpp:563, fuse_requantize()",
+            "description": "When two consecutive matmuls are both quantized, propagate the first layer's output scale to match the second layer's input scale. Eliminates a dequant→requant round-trip.",
+            "llama_adaptation": "Apply to chained transformer matmuls: attn_q→attn_output, ffn_gate→ffn_down. The fusion sets output_scale[layer_l] = input_scale[layer_l+1] so the requantize happens inline during the matmul output write."
+          },
+          "recommended_workflow": [
+            "1. Run KL entropy calibration on 500 calibration samples → produces initial scale table",
+            "2. Run EQ refinement on the KL-seeded table → refines scales to maximize cosine similarity",
+            "3. Quantize model with refined scales: llama-calibrate --model model.gguf --calibrate data.txt --method eq --output model.table",
+            "4. Apply: llama-quantize --scales model.table --type Q4_K model.gguf model-q4.gguf",
+            "5. Validate: llama-stability-runner --ref model-f16.gguf --quant model-q4.gguf",
+            "6. Runtime: ACIQ monitor checks for distribution drift during inference, triggers recalibration if needed"
+          ]
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "build/bin/llama-stability-runner --help exits 0",
+          "build/bin/llama-calibrate --help exits 0",
+          "Round-trip test: round_trip_test with Q4_0 returns cos_sim > 0.99",
+          "KL divergence: kl_divergence on identical distributions returns ~0.0",
+          "Full stability run: stability-runner --ref model-f16.gguf --quant model-q4.gguf produces report with all metrics",
+          "KL calibration: llama-calibrate --model model.gguf --method kl --calibrate data.txt --output model.table produces non-empty scale table",
+          "ACIQ calibration: llama-calibrate --method aciq completes in <30s for a 7B model",
+          "EQ refinement: llama-calibrate --method eq produces scales with cos_sim > 0.99 per layer",
+          "Scale application: llama-quantize --scales model.table produces model with PPL 2-5% better than without scales"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 13,
+        "name": "hybrid_backend_skeleton",
+        "axis": "axis_5_hybrid_uma",
+        "description": "Create the ggml-hybrid backend — a first-class ggml_backend_i implementation that simultaneously dispatches to CPU threads (AVX2/AVX-512/NEON) and iGPU compute (Vulkan). From the scheduler's perspective it's one backend. Internally it splits GEMM rows across CPU and iGPU with zero synchronization.",
+        "principle": "The hybrid backend exploits Unified Memory Architecture (UMA) on laptops/edge devices where CPU and iGPU share the same physical RAM. Unlike discrete GPU backends (CUDA, Metal) which require PCIe data transfers, the hybrid backend reads/writes the same memory pages from both units. This mirrors cactus-kernels' zero-copy philosophy.",
+        "scope": "Targets: Intel Iris Xe, AMD Radeon iGPU (APU), Apple Silicon (via Metal unified memory), ARM Mali/Adreno. Not for discrete GPUs (those use CUDA/Vulkan backends directly).",
+        "files": {
+          "create": [
+            {
+              "path": "ggml/src/ggml-hybrid/ggml-hybrid.h",
+              "content": "#pragma once\n#include \"ggml-backend.h\"\n#include \"ggml.h\"\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n// The hybrid backend: CPU + iGPU concurrent execution on UMA hardware.\n// Registers as a standard ggml_backend — the scheduler treats it as one device.\n// Internally splits GEMM rows between CPU thread pool and Vulkan compute queue.\n\nGGML_API ggml_backend_t ggml_backend_hybrid_init(void);\n\nGGML_API ggml_backend_buffer_type_t ggml_backend_hybrid_buffer_type(void);\n\n// Returns true if this device has UMA (shared CPU/iGPU memory)\nGGML_API bool ggml_backend_hybrid_is_uma(void);\n\n// Thermal telemetry for the adaptive scheduler\nstruct ggml_hybrid_thermal_state {\n    float cpu_temp_c;       // CPU temperature\n    float igpu_temp_c;      // iGPU temperature\n    float cpu_utilization;  // 0.0-1.0\n    float igpu_utilization; // 0.0-1.0\n    float cpu_to_igpu_ratio;// adaptive split (0.0=all-CPU, 1.0=all-iGPU)\n};\n\nGGML_API struct ggml_hybrid_thermal_state ggml_hybrid_get_thermal(void);\n\n#ifdef __cplusplus\n}\n#endif"
+            },
+            {
+              "path": "ggml/src/ggml-hybrid/ggml-hybrid.cpp",
+              "content_template": "// Implements ggml_backend_i for hybrid CPU+iGPU execution.\n// Key methods:\n// - hybrid_buffer_alloc: allocates UMA shared memory (VK_EXT_external_memory_host on Linux, ReBAR on Windows)\n// - hybrid_graph_compute: dispatches each op to CPU threads or iGPU shaders based on adaptive split\n// - hybrid_supports_op: all ops supported (CPU fallback for anything iGPU can't do)\n//\n// The backend registers quant support via ggml_backend_register_quant_ops()\n// for types that have Vulkan dequant shaders (Phase 15).\n\n#include \"ggml-hybrid.h\"\n#include \"ggml-backend-impl.h\"\n#include \"ggml-quant-caps.h\"\n#include \"ggml-backend-quant.h\"\n\n// Static state\nstatic struct {\n    bool initialized;\n    bool uma_capable;\n    struct ggml_hybrid_thermal_state thermal;\n    // Vulkan handles for iGPU dispatch\n    // VkDevice, VkQueue, VkCommandBuffer, etc.\n} hybrid_state;\n\n// ... ggml_backend_i implementation ...\n// Key: hybrid_graph_compute_dispatch() splits each GEMM by rows\n// CPU rows: [0 .. split_row)\n// iGPU rows: [split_row .. total_rows)\n// No synchronization between them — disjoint output memory"
+            },
+            {
+              "path": "ggml/src/ggml-hybrid/CMakeLists.txt",
+              "content": "option(GGML_HYBRID \"ggml: use hybrid CPU+iGPU backend\" OFF)\n\nif(GGML_HYBRID)\n    message(STATUS \"Hybrid CPU+iGPU backend enabled\")\n    set(HYBRID_SOURCES\n        ggml-hybrid.cpp\n        uma/uma-buffer.cpp\n        compute/mul-mat-dispatch.cpp\n        compute/dequant-vulkan.cpp\n        scheduler/thermal-balancer.cpp\n    )\n\n    # Require Vulkan for iGPU compute\n    find_package(Vulkan REQUIRED)\n\n    # GLSL compute shaders compiled to SPIR-V at build time\n    file(GLOB HYBRID_SHADERS \"${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.comp\")\n    foreach(shader ${HYBRID_SHADERS})\n        get_filename_component(shader_name ${shader} NAME_WE)\n        # Embed SPIR-V as C header (glslangValidator or glslc)\n        add_custom_command(\n            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${shader_name}.spv.h\n            COMMAND ${Vulkan_GLSLANG_VALIDATOR} -V --vn ${shader_name}_spv\n                    -o ${CMAKE_CURRENT_BINARY_DIR}/${shader_name}.spv.h ${shader}\n            DEPENDS ${shader}\n        )\n        list(APPEND HYBRID_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/${shader_name}.spv.h)\n    endforeach()\n\n    add_library(ggml-hybrid OBJECT ${HYBRID_SOURCES})\n    target_link_libraries(ggml-hybrid PUBLIC Vulkan::Vulkan)\n    target_include_directories(ggml-hybrid PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})\nendif()"
+            },
+            {
+              "path": "ggml/src/ggml-hybrid/uma/uma-buffer.cpp",
+              "description": "Zero-copy UMA buffer allocation. Allocates system RAM that is simultaneously accessible by CPU (via pointer) and iGPU (via Vulkan memory mapping). On Linux uses VK_EXT_external_memory_host or DMA-BUF. On Windows uses ReBAR. Eliminates all data transfers between CPU and iGPU.",
+              "content_template": "// UMA buffer: single physical allocation, dual access\n//\n// VkMemoryAllocateFlags with VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT\n// + VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT\n// + VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT\n//\n// Result: void* ptr usable by CPU AND VkBuffer usable by iGPU,\n// pointing to the same physical pages. Zero copies, zero sync."
+            },
+            {
+              "path": "ggml/src/ggml-hybrid/compute/mul-mat-dispatch.cpp",
+              "description": "The core GEMM dispatcher. Splits the output tensor dst into two disjoint row ranges: CPU writes [0..split_row), iGPU writes [split_row..N). No synchronization between them because the memory regions don't overlap.",
+              "content_template": "// Disjoint UMA Tensor Slicing:\n//\n// For mul_mat (GEMM): dst = src0 @ src1\n//   src0: weights (read-only, shared by both units)\n//   src1: activations (read-only, shared by both units)\n//   dst: output (split: CPU writes top rows, iGPU writes bottom rows)\n//\n// cpu_view = dst[0 : split_row]\n// igpu_view = dst[split_row : total_rows]\n//\n// Launch both concurrently:\n//   cpu_threadpool->submit(gemm_simd, cpu_view, src0, src1)\n//   vulkan_queue->submit(gemm_shader, igpu_view, src0, src1)\n//\n// NO BARRIER between them. The ggml graph scheduler handles\n// inter-op dependencies at the graph level, not within a single op.\n\nvoid hybrid_mul_mat_dispatch(ggml_tensor * dst, const ggml_tensor * src0, const ggml_tensor * src1) {\n    const float cpu_ratio = hybrid_state.thermal.cpu_to_igpu_ratio;\n    const int total_rows = (int)dst->ne[1];\n    const int split_row = (int)(total_rows * cpu_ratio);\n\n    if (split_row > 0) {\n        // CPU slice: AVX2/AVX-512/NEON optimized GEMM\n        cpu_pool.submit([&]() {\n            ggml_compute_mul_mat_cpu(dst, src0, src1, /*row_start=*/0, /*row_end=*/split_row);\n        });\n    }\n\n    if (split_row < total_rows) {\n        // iGPU slice: Vulkan compute shader with inline dequant\n        vk_queue.submit(gemm_shader, dst, src0, src1, /*row_start=*/split_row, /*row_end=*/total_rows);\n    }\n\n    // Wait for both — but NO data copy, both wrote to their own rows in dst\n    cpu_pool.wait();\n    vk_queue.wait();\n}"
+            },
+            {
+              "path": "ggml/src/ggml-hybrid/scheduler/thermal-balancer.cpp",
+              "description": "PID controller that measures CPU vs iGPU completion time per transformer layer and adjusts the split ratio. Prevents thermal throttling from causing one unit to idle while waiting for the other.",
+              "content_template": "// Adaptive Thermal Balancer\n//\n// After each transformer layer, measure:\n//   cpu_time = time for CPU to complete its rows\n//   igpu_time = time for iGPU to complete its rows\n//\n// If igpu_time > cpu_time * 1.1 (iGPU throttling or memory-bound):\n//   increase cpu_ratio by 0.05 (shift work to CPU)\n// If cpu_time > igpu_time * 1.1 (CPU is bottleneck):\n//   decrease cpu_ratio by 0.05 (shift work to iGPU)\n//\n// Clamp cpu_ratio to [0.1, 0.9] — never go fully one-sided\n// (both units should always be active to maximize throughput).\n//\n// Also reads thermal zones:\n//   /sys/class/thermal/thermal_zone*/temp (Linux)\n//   system_profiler SPMDataType (macOS)\n// If either unit exceeds 85C, reduce its workload aggressively.\n\nstruct thermal_balancer {\n    float cpu_ratio = 0.5f;  // start at 50/50\n    float cpu_ema_time = 0.0f;  // exponential moving average\n    float igpu_ema_time = 0.0f;\n\n    void update(float cpu_time, float igpu_time) {\n        cpu_ema_time = cpu_ema_time * 0.9f + cpu_time * 0.1f;\n        igpu_ema_time = igpu_ema_time * 0.9f + igpu_time * 0.1f;\n\n        if (igpu_ema_time > cpu_ema_time * 1.1f) {\n            cpu_ratio = std::min(0.9f, cpu_ratio + 0.05f);\n        } else if (cpu_ema_time > igpu_ema_time * 1.1f) {\n            cpu_ratio = std::max(0.1f, cpu_ratio - 0.05f);\n        }\n\n        // Thermal override\n        auto therm = read_thermal_zones();\n        if (therm.igpu_temp > 85.0f) cpu_ratio = std::min(0.9f, cpu_ratio + 0.1f);\n        if (therm.cpu_temp > 85.0f) cpu_ratio = std::max(0.1f, cpu_ratio - 0.1f);\n    }\n};"
+            }
+          ]
+        },
+        "backend_registration": {
+          "description": "The hybrid backend registers quant support for types that have Vulkan dequant shaders. Types without shaders fall back to CPU (still within the hybrid backend — the CPU thread pool handles them).",
+          "code": "// During ggml_backend_hybrid_init():\n// Register dequant support for types with Vulkan shaders\n#ifdef GGML_TYPE_Q4_0\nggml_backend_register_quant_ops(hybrid_dev, GGML_TYPE_Q4_0, &q4_0_hybrid_ops);\n#endif\n#ifdef GGML_TYPE_Q4_K\nggml_backend_register_quant_ops(hybrid_dev, GGML_TYPE_Q4_K, &q4_k_hybrid_ops);\n#endif\n#ifdef GGML_TYPE_TURBO3_0\nggml_backend_register_quant_ops(hybrid_dev, GGML_TYPE_TURBO3_0, &turbo3_hybrid_ops);\n#endif\n// Types NOT registered (no shader yet) → hybrid backend uses CPU thread pool for those\n// (still works, just no iGPU acceleration for that type)"
+        },
+        "validation": [
+          "cmake -B build -DGGML_HYBRID=ON -DGGML_VULKAN=ON exits 0",
+          "cmake --build build -j$(nproc) exits 0",
+          "ggml_backend_hybrid_is_uma() returns true on Intel/AMD iGPU systems",
+          "Loading a model with hybrid backend: CPU utilization + iGPU utilization both > 0",
+          "Adaptive balancer adjusts split ratio over time (log shows cpu_ratio changing)"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 14,
+        "name": "hybrid_uma_tensor_slicing",
+        "axis": "axis_5_hybrid_uma",
+        "description": "Implement the disjoint UMA tensor slicing for GEMM operations. The CPU and iGPU write to non-overlapping rows of the same output tensor — zero synchronization, zero data copy.",
+        "principle": "Standard CPU+GPU split requires a sync barrier after the split because both units might write to overlapping memory. Disjoint slicing eliminates this by giving each unit a strictly non-overlapping row range in the output tensor. Since they share UMA RAM, both read the same src0 (weights) and src1 (activations) without copying.",
+        "key_constraint": "src0 (weights) and src1 (activations) are READ-ONLY by both units — safe to share. dst (output) is split into disjoint regions — safe to write concurrently. The only synchronization is waiting for BOTH to finish before the NEXT graph operation (handled by ggml's graph scheduler, not by the hybrid backend).",
+        "files": {
+          "create": [
+            {
+              "path": "ggml/src/ggml-hybrid/compute/mul-mat-dispatch.cpp",
+              "description": "Full implementation of hybrid_mul_mat_dispatch. Creates tensor views for CPU and iGPU slices, launches both concurrently, waits for both at the end.",
+              "key_detail": "Creating a tensor view is zero-copy pointer arithmetic: igpu_view.data = (char*)dst->data + split_row * dst->nb[1]. No allocation, no copy."
+            }
+          ]
+        },
+        "ops_to_dispatch": [
+          "GGML_OP_MUL_MAT — primary target (GEMM is 80%+ of transformer compute)",
+          "GGML_OP_MUL_MAT_ID — MoE expert dispatch (same row-split pattern)",
+          "GGML_OP_ADD — residual connection (element-wise, trivially split)",
+          "GGML_OP_ROPE — rotary embedding (per-head, independently splittable)",
+          "Other ops fall through to CPU-only (iGPU acceleration not worth the overhead)"
+        ],
+        "validation": [
+          "GEMM correctness: output matches CPU-only reference for all split ratios [0.1 .. 0.9]",
+          "No race conditions: valgrind/helgrind clean on the output tensor",
+          "Performance: hybrid GEMM latency < max(cpu_only, igpu_only) for balanced split"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 15,
+        "name": "hybrid_vulkan_dequant_shaders",
+        "axis": "axis_5_hybrid_uma",
+        "description": "Write Vulkan compute shaders that dequantize ggml quant types directly in the iGPU shader using subgroup operations. This keeps weights compressed in shared RAM while computing in FP16/FP32 — minimizing memory bandwidth pressure, which is the critical bottleneck on edge devices.",
+        "principle": "cactus-kernels achieves high performance on ARM via hand-tuned NEON SIMD intrinsics. The iGPU equivalent is Vulkan Subgroups (GL_KHR_shader_subgroup_*). 32 iGPU threads cooperatively dequantize a 256-element block in a single clock cycle using subgroup shuffles to broadcast scales across the wavefront.",
+        "files": {
+          "create": [
+            {
+              "path": "ggml/src/ggml-hybrid/shaders/gemm_q4_0.comp",
+              "description": "Vulkan GLSL compute shader for Q4_0 matrix multiplication with inline dequantization. Uses subgroup shuffle for block-scale broadcast and subgroupAdd for warp-level reduction.",
+              "content_template": "#version 460\n#extension GL_KHR_shader_subgroup_arithmetic : enable\n#extension GL_KHR_shader_subgroup_shuffle : enable\n\nlayout(local_size_x = 32) in; // 1 subgroup = 32 threads\n\nlayout(set=0, binding=0) readonly buffer Weights { uint weights[]; };\nlayout(set=0, binding=1) readonly buffer Activations { float x[]; };\nlayout(set=0, binding=2) buffer Output { float y[]; };\nlayout(push_constant) uniform Push { int M; int N; int K; int row_offset; } pc;\n\nvoid main() {\n    uint lane = gl_SubgroupInvocationID;\n    uint row = gl_WorkGroupID.x + pc.row_offset;\n    uint col = gl_WorkGroupID.y;\n    if (row >= pc.N || col >= pc.M) return;\n\n    float sum = 0.0;\n    // Q4_0 block: 32 elements per block, 1 fp16 scale + 16 packed nibbles\n    for (uint k = 0; k < pc.K; k += 32) {\n        uint block_idx = (row * pc.K + k) / 32;\n        // Load scale (broadcast via subgroup shuffle)\n        float d = subgroupShuffle(unpackHalf2x16(weights[block_idx * 18]).x, 0);\n        // Load nibble for this lane\n        uint q = weights[block_idx * 18 + 2 + lane / 2];\n        float w = d * (((q >> (lane % 2 * 4)) & 0xF) - 8);\n        // Dot product with activation\n        sum += w * x[col * pc.K + k + lane];\n    }\n    // Warp-level reduction\n    sum = subgroupAdd(sum);\n    if (lane == 0) atomicAdd(y[col * pc.N + row], sum);\n}"
+            },
+            {
+              "path": "ggml/src/ggml-hybrid/shaders/gemm_q4_k.comp",
+              "description": "Q4_K variant — more complex block structure (super-blocks with 8 sub-scales). Uses 2 subgroup shuffles per super-block."
+            },
+            {
+              "path": "ggml/src/ggml-hybrid/shaders/gemm_turbo3.comp",
+              "description": "Turbo3 variant — dequantizes WHT-rotated Q2 blocks. Uses subgroup matrix multiply for the 4x4 Hadamard step."
+            },
+            {
+              "path": "ggml/src/ggml-hybrid/shaders/gemm_q8_0.comp",
+              "description": "Q8_0 variant — simplest (8-bit symmetric). Baseline for performance comparison."
+            }
+          ]
+        },
+        "quant_caps_integration": {
+          "description": "After writing each shader, register the type as supported on the hybrid backend via ggml_backend_register_quant_ops(). The caps table (Phase 2) already knows the type's semantic capabilities — the hybrid backend just declares it has a kernel for it.",
+          "code": "// After shader compilation:\nggml_backend_register_quant_ops(hybrid_dev, GGML_TYPE_Q4_0, &(struct ggml_backend_quant_ops){\n    .dequantize_row = hybrid_dequant_q4_0,  // calls Vulkan shader\n    .fattn_vec     = NULL,  // attention not accelerated yet\n});"
+        },
+        "validation": [
+          "Each shader compiles via glslangValidator without errors",
+          "Q4_0 GEMM output matches CPU reference within fp32 epsilon",
+          "Q4_K GEMM output matches CPU reference",
+          "iGPU shader execution time < CPU-only execution time for K >= 1024 (bandwidth-bound regime)"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 16,
+        "name": "hybrid_adaptive_thermal_balancer",
+        "axis": "axis_5_hybrid_uma",
+        "description": "Implement the PID controller that dynamically adjusts CPU/iGPU workload split based on completion time deltas and thermal telemetry. Prevents either unit from idling while the other throttles.",
+        "principle": "Edge devices aggressively throttle under sustained AI loads. If the iGPU hits 85C, its clock halves, making it slower than the CPU. A static 50/50 split would cause the CPU to finish early and idle. The adaptive balancer measures per-layer completion times and shifts the split ratio to keep both units busy.",
+        "telemetry_sources": {
+          "linux": [
+            "/sys/class/thermal/thermal_zone*/temp — CPU and iGPU temperature",
+            "/sys/class/hwmon/hwmon*/temp*_input — per-core temps",
+            "/sys/class/hwmon/hwmon*/power*_input — power draw (Intel RAPL, AMD)",
+            "/proc/stat — CPU utilization"
+          ],
+          "macos": [
+            "powermetrics — SMC thermal/power (requires sudo, sampled at 1s intervals)"
+          ],
+          "windows": [
+            "WMI: MSAcpi_ThermalZoneTemperature — temperature",
+            "Intel Power Gadget API — CPU power/freq"
+          ],
+          "fallback": "If no thermal telemetry available, use completion-time-only PID (no thermal override)."
+        },
+        "pid_parameters": {
+          "kp": 0.05,
+          "ki": 0.01,
+          "kd": 0.0,
+          "ratio_clamp": [0.1, 0.9],
+          "thermal_threshold_c": 85.0,
+          "thermal_penalty": 0.1,
+          "ema_alpha": 0.9,
+          "update_interval_layers": 1
+        },
+        "validation": [
+          "Under sustained load: cpu_ratio converges (oscillation dampens within 20 layers)",
+          "Thermal throttle simulation: forcing igpu_temp > 85 causes ratio to shift toward CPU",
+          "Cold start: ratio starts at 0.5 and adapts within 5 layers",
+          "No telemetry: defaults to fixed 0.5 split with warning log"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 17,
+        "name": "hybrid_prober_integration",
+        "axis": "axis_5_hybrid_uma",
+        "description": "Add the hybrid backend to llama_prober_config.json so it auto-detects on Intel/AMD iGPU systems. No flags needed — if an iGPU with UMA is detected, the hybrid backend is enabled alongside Vulkan.",
+        "files": {
+          "modify": [
+            {
+              "path": "llama_prober_config.json",
+              "instruction": "Add a new probe entry for the hybrid backend. It should detect Intel/AMD integrated graphics (NOT discrete NVIDIA/AMD dGPUs — those use CUDA/HIP directly). The probe checks for: (1) iGPU hardware via lspci, (2) UMA capability via Vulkan memory properties, (3) Vulkan SDK availability.",
+              "entry_to_add": {
+                "backend": "HYBRID",
+                "target_devices": ["Intel iGPU (Iris Xe, UHD)", "AMD APU iGPU (Radeon Vega/RDNA)", "ARM Mali/Adreno"],
+                "os_support": ["Linux", "Windows"],
+                "probe_commands": [
+                  "lspci 2>/dev/null | grep -iE 'VGA.*(Intel|AMD)' | grep -iv 'NVIDIA'",
+                  "vulkaninfo --summary 2>/dev/null | grep -i 'deviceType.*integrated'"
+                ],
+                "uma_check": "vulkaninfo 2>/dev/null | grep -A5 'memoryProperties' | grep -i 'HOST_VISIBLE.*DEVICE_LOCAL'",
+                "sdk_commands": ["pkg-config --exists vulkan", "vulkaninfo --summary"],
+                "cmake_flags": ["-DGGML_HYBRID=ON", "-DGGML_VULKAN=ON"],
+                "priority": 3,
+                "fallback": "Vulkan",
+                "notes": "The hybrid backend requires Vulkan for iGPU compute. If iGPU detected but no UMA, falls back to Vulkan-only (CPU+iGPU with copy overhead). If no iGPU, falls back to CPU+BLAS."
+              }
+            },
+            {
+              "path": "llama_prober.py",
+              "instruction": "Add UMA capability check. After detecting an iGPU, verify it shares system RAM (UMA). If not UMA (discrete GPU masquerading as integrated), skip hybrid — use the dedicated backend instead.",
+              "code_to_add": "def check_uma(self, probe):\n    \"\"\"Check if the detected iGPU has UMA (shared system RAM).\"\"\"\n    uma_cmd = probe.get('uma_check', '')\n    if not uma_cmd:\n        return True  # assume UMA if no check specified\n    ok, output = probe_command(uma_cmd)\n    if ok:\n        return True\n    # Non-UMA: discrete GPU, skip hybrid\n    return False"
+            }
+          ]
+        },
+        "validation": [
+          "On Intel Iris Xe laptop: cmake -B build auto-enables GGML_HYBRID=ON + GGML_VULKAN=ON",
+          "On NVIDIA dGPU desktop: hybrid NOT enabled (lspci doesn't match integrated pattern)",
+          "On CPU-only server: hybrid NOT enabled, CPU+BLAS used",
+          "cmake --build build -j$(nproc) exits 0 with hybrid enabled"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 18,
+        "name": "integrate_stq1_0",
+        "axis": "axis_1_quant_caps",
+        "description": "Integrate STQ1_0 (1.31 bpw structured ternary) from Tencent AngelSlim PR #22836. STQ1_0 is the RUNTIME INFERENCE FORMAT for the Sherry quantization algorithm (arxiv.org/abs/2601.07892). Sherry introduces 3:4 fine-grained sparsity — exactly one zero per group of 4 weights — achieving 1.25-bit width with power-of-two alignment. STQ1_0 stores these weights in 5 bits per group (1.31 bpw including fp16 scale). Includes ARM NEON optimized dot product using codebook table lookup + vdotq. Ideal for extreme edge-device compression.",
+        "relationship_to_sherry": {
+          "sherry": "The TRAINING algorithm (Python/PyTorch). Produces STQ1_0-formatted weights via QAT with 'Arenas' annealing to prevent weight trapping. Not portable to C — stays as external tool.",
+          "stq1_0": "The RUNTIME FORMAT (C/ggml). Stores and computes Sherry-trained weights at inference time. This is what Phase 18 integrates.",
+          "summary": "Phase 18 = inference kernel. Use pre-trained Sherry weights from AngelSlim's HuggingFace (e.g., HY-1.8B-2Bit, Hy-MT1.5-1.8B-1.25bit). Do NOT expect PTQ (post-training quantization via llama-quantize) to match paper quality — the 3:4 sparsity pattern must be learned during training."
+        },
+        "quality_benchmarks": {
+          "source": "arxiv.org/abs/2601.07892 (Sherry paper)",
+          "qat_trained": {
+            "model": "LLaMA-3.2 1B",
+            "result": "Zero accuracy loss vs SOTA ternary across 5 benchmarks (ARC, HellaSwag, PIQA, WinoGrande, MMLU)",
+            "vs_full_precision": "<2% accuracy gap",
+            "speedup": "10% faster than 2-bit ternary on Intel i7-14700HX CPU (due to 25% fewer bits)",
+            "note": "These results require QAT-trained weights from Sherry's Python framework"
+          },
+          "ptq_estimated": {
+            "model": "Any model quantized via llama-quantize --type STQ1_0",
+            "estimated_quality": "~80-85% of F16 accuracy (significant degradation)",
+            "reason": "The structured 3:4 sparsity pattern (exactly one zero per group of 4) is suboptimal when applied post-hoc. Sherry's QAT learns which weight to zero per group — PTQ picks the smallest, which is a greedy heuristic that leaves quality on the table.",
+            "recommendation": "Use STQ1_0 PTQ only for rapid prototyping. For production, use pre-trained Sherry weights from HuggingFace."
+          },
+          "compression_ratio": "1.31 bpw = 8.2% of F16 model size. A 7B model: F16=14GB → STQ1_0=1.15GB.",
+          "pretrained_models": [
+            "huggingface.co/AngelSlim/HY-1.8B-2Bit (1.8B params, 2-bit)",
+            "huggingface.co/AngelSlim/Hy-MT1.5-1.8B-1.25bit (1.8B translation model, 1.25-bit)",
+            "huggingface.co/AngelSlim/Hy-MT1.5-1.8B-2bit (1.8B translation model, 2-bit)"
+          ]
+        },
+        "source": "https://github.com/ggml-org/llama.cpp/pull/22836",
+        "source_diff": "Full diff retrieved and analyzed. The PR touches 16 files across ggml, CPU backend, and llama tools.",
+        "pr_summary": {
+          "type": "GGML_TYPE_STQ1_0 (1.31 bpw structured ternary)",
+          "block": "block_stq1_0: qs[QK_K/8] (4-bit code) + sign[QK_K/32] (1-bit table select) + d (fp16 scale)",
+          "codebook": "32-entry lookup table: (sign<<4 | slot) -> packed 4-lane ternary pattern. Reverse maps: 256-entry qpack->slot and qpack->sign for encoding.",
+          "kernels": {
+            "reference_C": "quantize_row_stq1_0_ref + dequantize_row_stq1_0 in ggml-quants.c",
+            "generic_dot": "ggml_vec_dot_stq1_0_q8_K_generic in ggml-cpu/quants.c (scalar C)",
+            "arm_neon": "ggml_vec_dot_stq1_0_q8_K in ggml-cpu/arch/arm/quants.c (NEON + DOTPROD, 32-byte tbl lookup + vdotq)",
+            "arch_fallbacks": "Added to all arch files: arm, x86, riscv, powerpc, s390x, loongarch"
+          },
+          "use_case": "Weight quantization for extreme compression on edge devices. Not suitable for KV cache (too low precision for attention)."
+        },
+        "adaptation_for_turboquant": {
+          "problem": "The PR is against upstream llama.cpp master (GGML_TYPE_COUNT=42). The turboquant branch has TURBO types at values 37-40 and will have PLANAR/ISO at 47-50. STQ1_0's enum value 42 may conflict.",
+          "solution": "Assign STQ1_0 the next available value AFTER all turboquant/planar/iso types. If GGML_TYPE_COUNT is already 51 (after planar/iso port in Phase 8), assign STQ1_0=51 and increment GGML_TYPE_COUNT=52.",
+          "type_traits": "Append entry after the last custom type in the type_traits[] array",
+          "dispatch": "Append case in the quantize_chunk switch after the last custom type"
+        },
+        "files_to_modify": [
+          {
+            "path": "ggml/include/ggml.h",
+            "action": "Add GGML_TYPE_STQ1_0 = <next_available_value> before GGML_TYPE_COUNT. Increment GGML_TYPE_COUNT.",
+            "from_pr": "Lines adding GGML_TYPE_STQ1_0 = 42 and GGML_TYPE_COUNT = 43"
+          },
+          {
+            "path": "ggml/src/ggml-common.h",
+            "action": "Add block_stq1_0 struct after block_tq2_0. Add codebook tables (stq1_0_codebook[32], stq1_0_qpack_to_slot[256], stq1_0_qpack_to_sign[256]) inside GGML_COMMON_IMPL guard.",
+            "from_pr": "block struct + 3 GGML_TABLE_BEGIN blocks. Copy verbatim — these are mathematical constants, not branch-dependent."
+          },
+          {
+            "path": "ggml/src/ggml-quants.h",
+            "action": "Add declarations: quantize_row_stq1_0_ref, dequantize_row_stq1_0, quantize_stq1_0. Append after tq2_0 declarations.",
+            "from_pr": "3 function declarations"
+          },
+          {
+            "path": "ggml/src/ggml-quants.c",
+            "action": "Add implementations: quantize_row_stq1_0_ref (encoder using reverse codebook maps), dequantize_row_stq1_0 (decoder using forward codebook), quantize_stq1_0 (wrapper). Add ggml_validate_row_data case. Append after tq2_0 implementations.",
+            "from_pr": "quantize_row_stq1_0_ref (~55 lines), dequantize_row_stq1_0 (~30 lines), quantize_stq1_0 (~6 lines), validate case (~3 lines)"
+          },
+          {
+            "path": "ggml/src/ggml-cpu/quants.h",
+            "action": "Add: quantize_row_stq1_0 declaration, ggml_vec_dot_stq1_0_q8_K declaration, ggml_vec_dot_stq1_0_q8_K_generic declaration."
+          },
+          {
+            "path": "ggml/src/ggml-cpu/quants.c",
+            "action": "Add quantize_row_stq1_0 wrapper + ggml_vec_dot_stq1_0_q8_K_generic (scalar reference dot product). Copy verbatim from PR."
+          },
+          {
+            "path": "ggml/src/ggml-cpu/ggml-cpu.c",
+            "action": "Add type_traits_cpu[GGML_TYPE_STQ1_0] entry with .from_float, .vec_dot, .vec_dot_type=GGML_TYPE_Q8_K, .nrows=1."
+          },
+          {
+            "path": "ggml/src/ggml-cpu/arch/arm/quants.c",
+            "action": "Add ggml_vec_dot_stq1_0_q8_K (ARM NEON optimized). This is the performance-critical kernel — uses vqtbl2q + vdotq for codebook lookup and dot product in a single pass. Copy verbatim from PR (~110 lines).",
+            "note": "If building for x86-only, this file is not compiled. The arch-fallback.h provides the generic mapping."
+          },
+          {
+            "path": "ggml/src/ggml-cpu/arch-fallback.h",
+            "action": "Add #define ggml_vec_dot_stq1_0_q8_K_generic to all arch sections (6 locations). Copy verbatim from PR."
+          },
+          {
+            "path": "ggml/src/ggml-cpu/ops.cpp",
+            "action": "Add GGML_TYPE_STQ1_0 to 6 switch cases: compute_forward_add, add1, acc, out_prod, set, get_rows, clamp. Each is a 1-line append next to existing TQ1_0/TQ2_0 entries."
+          },
+          {
+            "path": "ggml/src/ggml.c",
+            "action": "Add type_traits[GGML_TYPE_STQ1_0] entry (type_name, blck_size=QK_K, type_size=sizeof(block_stq1_0), is_quantized=true, to_float, from_float_ref). Add quantize_chunk dispatch case."
+          },
+          {
+            "path": "ggml/src/ggml-quant-caps.c",
+            "action": "Add caps entry: [GGML_TYPE_STQ1_0] = { .weight_capable=true, .cpu_fallback_ok=true }. STQ1_0 is weight-only — no needs_wht, no needs_deferred, no KV-cache capability."
+          },
+          {
+            "path": "include/llama.h",
+            "action": "Add LLAMA_FTYPE_MOSTLY_STQ1_0 = <next_available> to the ftype enum."
+          },
+          {
+            "path": "src/llama-model-loader.cpp",
+            "action": "Add ftype name string ('STQ1_0 - 1.31 bpw ternary') and GGML_TYPE_STQ1_0 -> LLAMA_FTYPE_MOSTLY_STQ1_0 mapping."
+          },
+          {
+            "path": "src/llama-quant.cpp",
+            "action": "Add STQ1_0 to tensor_type_fallback and llama_ftype_get_default_type. Add to the TQ1_0/TQ2_0 fallback group (these extreme low-bit types fall back to Q4_K for 1d tensors)."
+          },
+          {
+            "path": "tools/quantize/quantize.cpp",
+            "action": "Add { 'STQ1_0', LLAMA_FTYPE_MOSTLY_STQ1_0, ' 1.31 bpw ternarization' } to QUANT_OPTIONS."
+          },
+          {
+            "path": "tests/test-quantize-fns.cpp",
+            "action": "Add STQ1_0 to test error thresholds (uses MAX_QUANTIZATION_TOTAL_ERROR_BINARY and MAX_DOT_PRODUCT_ERROR_BINARY, same as Q1_0)."
+          },
+          {
+            "path": "gguf-py/gguf/constants.py",
+            "action": "Add STQ1_0=42 to GGMLQuantizationType enum, MOSTLY_STQ1_0 to LlamaFileType, and block size mapping (256, 42)."
+          }
+        ],
+        "hybrid_integration": {
+          "description": "After integration, add a Vulkan compute shader for STQ1_0 in the hybrid backend (Phase 15 pattern). The codebook lookup translates perfectly to Vulkan subgroup shuffle — 32 threads cooperatively decode one 4-lane group.",
+          "shader_plan": "ggml/src/ggml-hybrid/shaders/gemm_stq1_0.comp — uses stq1_0_codebook as a uniform buffer, subgroupShuffle to broadcast the codebook index, and subgroupAdd for the dot-product reduction."
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "Quantize: build/bin/llama-quantize --quantize-output-type STQ1_0 model.gguf model-stq1.gguf",
+          "Load: build/bin/llama-cli -m model-stq1.gguf -p 'Hello' -n 10 exits 0",
+          "ARM NEON: on ARM device, verify vec_dot uses NEON path (no scalar fallback)",
+          "Round-trip: stability-runner reports cos_sim > 0.95 for STQ1_0 (lower than Q4_0 due to 1.31 bpw, but usable)",
+          "PPL: STQ1_0 PPL delta < 15% from F16 (1.31 bpw is extreme compression)",
+          "File size: model-stq1.gguf is ~1.31/16 = 8.2% of model-f16.gguf size"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 19,
+        "name": "port_tequila_ternary",
+        "axis": "axis_1_quant_caps",
+        "description": "Port the Tequila ternary quantization algorithm from Tencent AngelSlim. Tequila solves 'deadzone trapping' — a failure mode where weights stuck at the zero boundary receive only noisy gradients during training, collapsing model capacity. Tequila repurposes trapped weights as dynamic biases that receive meaningful gradients. Paper: arxiv.org/abs/2509.23809. Tequila is a QAT algorithm; the C port implements the quantize/dequantize runtime format and an improved PTQ quantizer that approximates the deadzone fix.",
+        "source": "https://github.com/Tencent/AngelSlim/tree/tequila/TernaryQuant",
+        "source_language": "Python (PyTorch) — quantizer ported to C, training stays Python",
+        "what_to_port": "The core quantization algorithm: deadzone-aware ternary rounding. For each weight block, compute the optimal ternary mapping {-1, 0, +1} with an adaptive threshold that accounts for the deadzone boundary. The PTQ approximation: instead of retraining trapped weights (which requires QAT), apply a correction bias to weights near the deadzone boundary, partially recovering the quality gap.",
+        "difference_from_stq1_0": "STQ1_0 forces structured sparsity (exactly one zero per 4 lanes, Sherry format). Tequila is unstructured ternary — each weight independently maps to {-d, 0, +d}. Tequila achieves higher quality (2.0 bpw vs 1.31 bpw) because unstructured ternary has more representational freedom. The deadzone correction helps even in PTQ mode.",
+        "quality_benchmarks": {
+          "source": "arxiv.org/abs/2509.23809 (Tequila paper)",
+          "qat_trained": {
+            "model": "LLaMA-3.2 1B",
+            "ARC": ">4% accuracy gain over SOTA ternary baseline (e.g., TWN, BitNet)",
+            "vs_full_precision": "<1% accuracy gap on ARC (nearly matching F16)",
+            "5benchmark_avg": "Best ternary SOTA across ARC, HellaSwag, PIQA, WinoGrande, MMLU",
+            "speedup": "3.0x inference speedup vs F16 (ternary replaces multiply with add)"
+          },
+          "ptq_estimated": {
+            "model": "Any model quantized via llama-quantize --type TEQUILA",
+            "estimated_quality": "~85-90% of F16 accuracy (better than STQ1_0 PTQ because deadzone correction helps even without QAT)",
+            "reason": "The deadzone bias correction partially mitigates the trapping issue even in PTQ. Weights near zero get a small correction term that pushes them to the correct side of the boundary, recovering some of the capacity loss.",
+            "vs_tq2_0": "Expected to match or slightly beat TQ2_0 (2.06 bpw) quality at similar compression, because Tequila's deadzone fix addresses TQ2_0's main quality bottleneck."
+          },
+          "compression_ratio": "2.0 bpw = 12.5% of F16 model size. A 7B model: F16=14GB → TEQUILA=1.75GB."
+        },
+        "new_type": {
+          "enum": "GGML_TYPE_TEQUILA = <next_available> (weight-only, 2.0 bpw)",
+          "block": "block_tequila: q[QK_K/4] (2-bit codes: 00=-1, 01=0, 10=+1) + d (fp16 scale) + imatrix_scale (fp16 per-block importance weight). Block size QK_K=256, sizeof = sizeof(ggml_half)*2 + QK_K/4 = 68 bytes → 2.125 bpw.",
+          "caps": "[GGML_TYPE_TEQUILA] = { .weight_capable=true, .needs_imatrix=true, .cpu_fallback_ok=true }"
+        },
+        "files": {
+          "create": [
+            {
+              "path": "ggml/src/ggml-tequila-quant.c",
+              "description": "Tequila ternary quantization implementation. Port from Python reference: quantize_row_tequila_ref (optimal ternary with imatrix weighting), dequantize_row_tequila, quantize_tequila (wrapper). The key algorithm: for each block of 256 weights, compute the optimal threshold for mapping to {-1, 0, +1} weighted by the importance matrix.",
+              "reference": "https://github.com/Tencent/AngelSlim/tree/tequila/TernaryQuant/quant_utils.py — function quantize_tequila_block()"
+            }
+          ],
+          "modify": [
+            "Same 16-file pattern as Phase 18 (STQ1_0): enum, block struct, declarations, implementations, type_traits, dispatch case, ops.cpp cases, ftype, quantize tool, tests, caps entry"
+          ]
+        },
+        "imatrix_integration": {
+          "description": "Tequila uses the importance matrix to guide quantization. The imatrix provides per-block sensitivity weights. Blocks with high importance get more careful rounding (prefer 0 over +/-1 when close to threshold). This requires the quantize tool to pass the imatrix to the quantization function.",
+          "api": "quantize_tequila(src, dst, nrows, n_per_row, imatrix) — the imatrix parameter is already supported in the ggml quantize API (used by Q4_K, IQ series)."
+        },
+        "validation": [
+          "cmake --build build -j$(nproc) exits 0",
+          "Without imatrix: quantize works but quality is lower (falls back to uniform threshold)",
+          "With imatrix: PPL delta < 8% from F16 (2-bit ternary, imatrix-guided)",
+          "File size: ~2.0/16 = 12.5% of model-f16.gguf size",
+          "Round-trip: cos_sim > 0.97"
+        ],
+        "block_until_pass": true
+      },
+      {
+        "phase": 20,
+        "name": "port_angelslim_algorithms",
+        "axis": "axis_1_quant_caps",
+        "description": "Catalog of additional algorithms from Tencent AngelSlim. STQ1_0 (Phase 18) already provides the runtime format for Sherry weights. This phase covers the remaining algorithms: LeptoQuant (FP8 calibration tool), DAQ (Python-only, not portable), and Eagle3 (speculative decoding). Each is assessed for portability and quality.",
+        "source": "https://github.com/Tencent/AngelSlim",
+        "quality_landscape": {
+          "compression_vs_quality": [
+            { "type": "F16 baseline", "bpw": 16.0, "accuracy": "100%", "method": "none" },
+            { "type": "FP8 (LeptoQuant)", "bpw": 8.0, "accuracy": "~99.5%", "method": "PTQ calibration", "note": "AngelSlim benchmarks: Qwen3-8B FP8-Static CEVAL 78.23 vs BF16 79.27 (-1.3%)" },
+            { "type": "INT4-AWQ", "bpw": 4.0, "accuracy": "~97%", "method": "PTQ", "note": "AngelSlim: Qwen3-8B INT4-AWQ CEVAL 76.15" },
+            { "type": "INT4-GPTQ", "bpw": 4.0, "accuracy": "~96%", "method": "PTQ", "note": "AngelSlim: Qwen3-8B INT4-GPTQ CEVAL 77.19" },
+            { "type": "Tequila (QAT)", "bpw": 2.0, "accuracy": "~97%", "method": "QAT + deadzone fix", "note": "<1% gap on ARC vs F16. Best ternary SOTA." },
+            { "type": "TQ2_0 (PTQ)", "bpw": 2.06, "accuracy": "~90-92%", "method": "PTQ", "note": "Current turboquant. Quality ceiling for pure PTQ ternary." },
+            { "type": "Sherry (QAT)", "bpw": 1.31, "accuracy": "~95%", "method": "QAT + Arenas annealing", "note": "Zero loss vs SOTA ternary. 25% fewer bits than 2-bit." },
+            { "type": "STQ1_0 (PTQ)", "bpw": 1.31, "accuracy": "~80-85%", "method": "PTQ (greedy 3:4)", "note": "Degraded without QAT. Use pre-trained Sherry weights for production." },
+            { "type": "TQ1_0 (PTQ)", "bpw": 1.69, "accuracy": "~88-90%", "method": "PTQ", "note": "Current turboquant ternary." },
+            { "type": "Q1_0 binary (PTQ)", "bpw": 1.0, "accuracy": "~70-75%", "method": "PTQ", "note": "Baseline binary. Too lossy for most models." }
+          ],
+          "key_insight": "The quality gap between QAT and PTQ widens dramatically below 3 bpw. At 4+ bpw, PTQ (GPTQ/AWQ) nearly matches F16. At 2 bpw, QAT (Tequila) is ~7% better than PTQ (TQ2_0). At 1.31 bpw, QAT (Sherry) is ~10-15% better than PTQ (STQ1_0). Conclusion: for extreme compression (<3 bpw), use pre-trained QAT weights. For moderate compression (4+ bpw), PTQ is sufficient."
+        },
+        "algorithms": [
+          {
+            "name": "Sherry (training algorithm — runtime format already in Phase 18)",
+            "bits": "1.25-bit (1.31 bpw including scale)",
+            "paper": "arxiv.org/abs/2601.07892",
+            "source_code": "https://github.com/Tencent/AngelSlim/tree/sherry/Sherry",
+            "description": "STQ1_0 (Phase 18) is the runtime inference format for Sherry weights. The Sherry training algorithm itself stays in Python (requires PyTorch autograd for Arenas annealing). To get Sherry-quality weights, use AngelSlim's pre-trained models from HuggingFace.",
+            "runtime_status": "ALREADY INTEGRATED as STQ1_0 in Phase 18. No separate runtime work needed.",
+            "training_status": "Python-only. Not portable to C. Use external tool + pre-trained weights.",
+            "quality_qat": "Zero accuracy loss vs SOTA ternary on LLaMA-3.2 1B (5 benchmarks). <2% gap from F16.",
+            "quality_ptq": "~80-85% of F16 (greedy heuristic, no Arenas annealing). Not recommended for production."
+          },
+          {
+            "name": "LeptoQuant",
+            "bits": "FP8 (8-bit float, E4M3)",
+            "docs": "https://angelslim.readthedocs.io/zh-cn/latest/features/quantization/fp8_lepto.html",
+            "description": "FP8 quantization with KL-divergence-minimizing scale calibration. The ggml FP8 type (GGML_TYPE_F8_E4M3) already exists upstream — LeptoQuant adds the calibration step that computes optimal per-tensor/per-channel scales.",
+            "approach": "Port the calibration tool to tools/quantize/. No new ggml type needed. The tool reads a model + calibration data, computes FP8 scales that minimize KL divergence, and writes a quantized GGUF.",
+            "port_effort": "Low — quant type exists, just calibration math",
+            "quality": {
+              "qwen3_8b_ceval": "78.23 (vs BF16: 79.27, delta: -1.3%)",
+              "qwen3_32b_ceval": "86.92 (vs BF16: 86.55, delta: +0.4% — within noise)",
+              "deepseek_r1_gpqa": "78.28 (FP8-Block-Wise)",
+              "note": "FP8 is the sweet spot: <2% quality loss, 2x compression, native hardware support on H100/RTX 4090"
+            }
+          },
+          {
+            "name": "DAQ (Distribution-Aware Quantization)",
+            "bits": "Variable",
+            "paper": "arxiv.org/abs/2603.22324",
+            "description": "DAQ preserves knowledge distribution during post-training training updates. Uses distillation-style loss to keep quantized model's output close to original. Requires calibration data + iterative optimization.",
+            "approach": "Not portable to C runtime — requires iterative weight updates (training). Keep as external Python tool that produces calibrated GGUF files.",
+            "port_effort": "None — stays Python",
+            "quality": "Preserves knowledge during fine-tuning of already-quantized models. Niche use case."
+          },
+          {
+            "name": "Eagle3 (Speculative Decoding)",
+            "type": "Speculative decoding drafter (not quantization)",
+            "docs": "https://angelslim.readthedocs.io/zh-cn/latest/features/speculative_decoding/eagle/index.html",
+            "description": "Eagle3 trains a small drafter model that reads the target model's hidden state and speculates multiple tokens. Achieves 1.4-1.9x speedup with accept length 1.8-3.5.",
+            "quality": {
+              "qwen3_1_7b_speedup": "642 tokens/s (vs 381 vanilla) = 1.68x speedup, accept_length 2.17",
+              "qwen3_32b_speedup": "74 tokens/s (vs 43 vanilla) = 1.71x speedup, accept_length 1.91",
+              "qwen3_vl_2b_speedup": "416 tokens/s (vs 234 vanilla) = 1.78x speedup, accept_length 2.50",
+              "qwen2_audio_speedup": "147 tokens/s (vs 79 vanilla) = 1.86x speedup, accept_length 3.51",
+              "note": "Eagle3 is orthogonal to quantization — works with any quant type. Combines well with KV-cache quantization (turbo/planar) for maximum throughput."
+            },
+            "integration": "Uses llama_get_hidden_state() API from Phase 10. Drafter model is a separate GGUF in a second llama_context linked via ctx_other. Training is external (AngelSlim provides pre-trained drafter weights on HuggingFace for Qwen3, Hunyuan, etc.).",
+            "port_effort": "Low for inference — hidden state API + speculative decode already exist. Medium for training (external Python tool)."
+          }
+        ],
+        "validation": [
+          "Each algorithm that produces a C quant type: cmake --build exits 0, quantize/load/round-trip works",
+          "LeptoQuant: FP8 calibration tool produces valid scales, PPL delta < 2%",
+          "Eagle3: drafter model loads, speculative decoding produces accept_length > 1.5",
+          "Sherry: if ported, PPL delta < 12% (1.25-bit extreme compression)"
+        ],
+        "block_until_pass": false,
+        "note": "This phase is a catalog of algorithms to port incrementally. Each algorithm is independent and can be prioritized based on requirements. Not all need to be completed — pick the highest-value ones (STQ1_0 already done in Phase 18, Tequila in Phase 19)."
+      }
+    ]
+  },
+  "prober_integration": {
+    "existing": "llama_prober.py + llama_prober_config.json already exist and work",
+    "enhancement_1": "Phase 1 adds CMake auto-invocation (cmake -B build with no flags)",
+    "enhancement_2": "Phase 1 adds SDK verification (detect hardware AND toolkit before enabling backend)",
+    "enhancement_3": "Runtime: llama-cli prints which backends are active and which quant types are GPU-accelerated vs CPU-fallback at startup",
+    "workflow": [
+      "User runs: cmake -B build && cmake --build build -j$(nproc)",
+      "Prober detects NVIDIA GPU + CUDA toolkit → enables GGML_CUDA=ON automatically",
+      "Prober detects Intel/AMD iGPU with UMA → enables GGML_HYBRID=ON + GGML_VULKAN=ON (disjoint tensor slicing, adaptive thermal balancing)",
+      "Prober detects Vulkan → enables GGML_VULKAN=ON as cross-vendor fallback",
+      "No GPU detected → CPU-only build (GGML_BLAS=ON, GGML_NATIVE=ON)",
+      "At runtime: context creation checks quant support per backend, logs warnings for CPU fallback types",
+      "On hybrid backend: thermal balancer adjusts CPU/iGPU split every layer, logs ratio changes at debug level"
+    ]
+  },
+  "future_addition_workflows": {
+    "new_quant_type": [
+      "1. Add enum to ggml.h (1 line)",
+      "2. Add block struct to ggml-common.h (append)",
+      "3. Create ggml-newtype-quant.c (implementation)",
+      "4. Add declarations to ggml-quants.h (append)",
+      "5. Add type_traits[] entry to ggml.c (append)",
+      "6. Add quantize dispatch case to ggml.c switch (append)",
+      "7. Add caps entry to ggml-quant-caps.c (1 entry)",
+      "8. If GPU: register via ggml_backend_register_quant_ops in backend init",
+      "9. Add .c file to CMakeLists.txt (1 line)",
+      "CHANGES TO kv-cache.cpp: 0",
+      "CHANGES TO graph.cpp: 0"
+    ],
+    "new_gpu_backend": [
+      "1. Create ggml/src/ggml-newbackend/ directory",
+      "2. Implement ggml-backend interface (buffer, compute, etc.)",
+      "3. Add probe entry to llama_prober_config.json (1 JSON block)",
+      "4. Add CMake option + conditional compilation",
+      "5. Register quant support for types that have kernels",
+      "CHANGES TO kv-cache.cpp: 0",
+      "CHANGES TO graph.cpp: 0",
+      "CHANGES TO prober Python: 0 (config-driven)"
+    ],
+    "new_model_arch": [
+      "1. Create src/models/newmodel.cpp (graph builder)",
+      "2. Add LLM_ARCH_NEWMODEL to llama-arch.h (1 enum + 1 string)",
+      "3. Add to model registry dispatch (1 case in switch)",
+      "4. If using whitelist: add to -DLLAMA_MODEL_WHITELIST or rebuild all",
+      "CHANGES TO kv-cache.cpp: 0",
+      "CHANGES TO graph.cpp: 0 (unless model needs new graph ops)"
+    ],
+    "upstream_pull": [
+      "1. git fetch upstream && git merge upstream/master",
+      "2. Conflicts expected ONLY in: ggml.h (enum), ggml-common.h (blocks), CMakeLists.txt",
+      "3. Resolve: keep both (append upstream + custom additions)",
+      "4. kv-cache.cpp and graph.cpp merge CLEANLY (caps-driven, no type checks to conflict)",
+      "5. Rebuild"
+    ],
+    "new_dequant_shader_for_hybrid": [
+      "1. Create ggml/src/ggml-hybrid/shaders/gemm_newtype.comp (Vulkan GLSL compute shader)",
+      "2. Compile SPIR-V header via CMake custom command (automatic)",
+      "3. Register: ggml_backend_register_quant_ops(hybrid_dev, GGML_TYPE_NEWTYPE, &ops) in ggml-hybrid.cpp",
+      "4. The hybrid backend now uses iGPU for this type; if no shader, CPU thread pool handles it",
+      "CHANGES TO kv-cache.cpp: 0",
+      "CHANGES TO graph.cpp: 0",
+      "CHANGES TO prober: 0"
+    ]
+  }
+}
