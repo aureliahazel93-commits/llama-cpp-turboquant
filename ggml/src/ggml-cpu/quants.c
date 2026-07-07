@@ -112,7 +112,78 @@ void quantize_row_tq2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, 
     quantize_row_tq2_0_ref(x, y, k);
 }
 
-//===================================== Q8_K ==============================================
+void quantize_row_stq1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    quantize_row_stq1_0_ref(x, (block_stq1_0 *)vy, k);
+}
+
+void ggml_vec_dot_stq1_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs,
+                                        const void * GGML_RESTRICT vx, size_t bx,
+                                        const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_ASSERT(nrc == 1);
+    GGML_UNUSED(bs); GGML_UNUSED(bx); GGML_UNUSED(by); GGML_UNUSED(nrc);
+
+    const int nb = n / QK_STQ1_0;
+
+    const block_stq1_0 * GGML_RESTRICT x = vx;
+    const block_q8_K    * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float dx = GGML_FP16_TO_FP32(x[i].d);
+        const int ng = QK_STQ1_0 / GS_STQ1_0;
+        int32_t sumi = 0;
+        for (int g = 0; g < ng; g++) {
+            uint8_t slot = (x[i].qs[g / 2] >> (4 * (g % 2))) & 0xF;
+            uint8_t sign_bit = (x[i].signs[g / 8] >> (g % 8)) & 1;
+            uint8_t packed = stq1_0_codebook[sign_bit * 16 + slot];
+            for (int w = 0; w < 4; w++) {
+                uint8_t code = (packed >> (w * 2)) & 3;
+                int qv = (code == 0) ? -1 : (code == 2) ? 1 : 0;
+                sumi += qv * y[i].qs[g * 4 + w];
+            }
+        }
+        sumf += dx * y[i].d * (float)sumi;
+    }
+
+    *s = sumf;
+}
+
+// TEQUILA: deadzone-aware ternary wrapper
+void quantize_row_tequila(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_tequila_ref(x, (block_tequila *)y, k);
+}
+
+void ggml_vec_dot_tequila_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs,
+                                       const void * GGML_RESTRICT vx, size_t bx,
+                                       const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_ASSERT(nrc == 1);
+    GGML_UNUSED(bs); GGML_UNUSED(bx); GGML_UNUSED(by); GGML_UNUSED(nrc);
+
+    const int nb = n / QK_K;
+
+    const block_tequila * GGML_RESTRICT x = vx;
+    const block_q8_K    * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float dx = ggml_fp16_to_fp32(x[i].d);
+        int32_t sumi = 0;
+        for (size_t j = 0; j < QK_K / 4; j++) {
+            const uint8_t byte = x[i].qs[j];
+            for (int m = 0; m < 4; m++) {
+                const uint8_t code = (byte >> (m * 2)) & 3;
+                const int qv = (code == 0) ? -1 : (code == 2) ? 1 : 0;
+                sumi += qv * y[i].qs[j*4 + m];
+            }
+        }
+        sumf += dx * y[i].d * (float)sumi;
+    }
+
+    *s = sumf;
+}
+
 
 void quantize_row_q8_K_generic(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q8_K_ref(x, y, k);
