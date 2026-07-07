@@ -157,6 +157,8 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q1_0          = 40, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_TQ3_1S        = 43, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_TQ4_1S        = 44, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_STQ1_0       = 45, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_TEQUILA     = 46, // AngelSlim Tequila: 2.0 bpw deadzone-aware ternary
 
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };
@@ -1582,6 +1584,20 @@ extern "C" {
             int64_t                   idata_split,
             ggml_opt_epoch_callback   callback_train,
             ggml_opt_epoch_callback   callback_eval);
+
+struct llama_hidden_state {
+    const float * data;
+    int32_t n_tokens;
+    int32_t n_embd;
+    int32_t n_layer;
+};
+
+GGML_API struct llama_hidden_state * llama_get_hidden_state(struct llama_context * ctx);
+GGML_API int32_t llama_feed_hidden_state(
+        struct llama_context           * ctx_drafter,
+        const struct llama_hidden_state * state,
+        int32_t                         n_tokens);
+GGML_API void llama_hidden_state_free(struct llama_hidden_state * state);
 
 #ifdef __cplusplus
 }
