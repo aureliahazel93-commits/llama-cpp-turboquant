@@ -441,7 +441,8 @@ extern "C" {
         GGML_TYPE_ISO4_0    = 50, // IsoQuant 4-bit KV cache: quaternion 4D rotation + 3-bit scalar + 1-bit QJL
         GGML_TYPE_STQ1_0   = 51, // AngelSlim STQ: 1.31 bpw structured ternary, 32-entry codebook
         GGML_TYPE_TEQUILA   = 52, // AngelSlim Tequila: 2.0 bpw deadzone-aware ternary, imatrix-weighted
-        GGML_TYPE_COUNT     = 53,
+        GGML_TYPE_F8_E4M3   = 53, // LeptoQuant FP8 E4M3: 8.06 bpw, KL-calibrated per-block scale
+        GGML_TYPE_COUNT     = 54,
     };
 
     // precision

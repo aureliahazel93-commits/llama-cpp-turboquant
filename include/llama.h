@@ -159,6 +159,7 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_TQ4_1S        = 44, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_STQ1_0       = 45, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_TEQUILA     = 46, // AngelSlim Tequila: 2.0 bpw deadzone-aware ternary
+        LLAMA_FTYPE_MOSTLY_F8_E4M3    = 47, // LeptoQuant FP8 E4M3: 8.06 bpw
 
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };

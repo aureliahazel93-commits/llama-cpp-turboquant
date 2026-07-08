@@ -284,6 +284,16 @@ typedef struct {
     ggml_half imatrix_scale;              // fp16 importance weight per block
 } block_tequila;
 static_assert(sizeof(block_tequila) == sizeof(ggml_half)*2 + QK_K / 4, "wrong tequila block size/padding");
+
+// LeptoQuant FP8 E4M3: 8-bit floating point, per-block fp32 scale
+#define QK8_F8_E4M3 QK_K
+#define QR8_F8_E4M3 1
+
+typedef struct {
+    float d;                       // per-block scale (fp32)
+    uint8_t q[QK8_F8_E4M3];       // 256 E4M3 values
+} block_f8_e4m3;
+static_assert(sizeof(block_f8_e4m3) == 260, "wrong f8_e4m3 block size/padding");
 // TurboQuant 3-bit MSE-only: 3-bit PolarQuant indices (no QJL)
 // Storage block size = 32 (matches q4_0 for optimal GPU parallelism)
 // Transform group size = 128 (head_dim, for rotation Gaussianization)

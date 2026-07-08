@@ -12,7 +12,8 @@
 #include <assert.h>
 #include <float.h>
 #include <stdlib.h> // for qsort
-#include <stdio.h>  // for GGML_ASSERT
+#include <stdio.h>
+#include <math.h>  // for GGML_ASSERT
 
 #define GROUP_MAX_EPS 1e-15f
 #define GROUP_MAX_EPS_IQ3_XXS 1e-8f
@@ -184,6 +185,47 @@ void ggml_vec_dot_tequila_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs
     *s = sumf;
 }
 
+
+
+// F8_E4M3: FP8 E4M3 per-block scale, dot with q8_K
+void ggml_vec_dot_f8_e4m3_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs,
+                                       const void * GGML_RESTRICT vx, size_t bx,
+                                       const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_ASSERT(nrc == 1);
+    GGML_UNUSED(bs); GGML_UNUSED(bx); GGML_UNUSED(by); GGML_UNUSED(nrc);
+
+    const int nb = n / QK_K;
+
+    const block_f8_e4m3 * GGML_RESTRICT x = vx;
+    const block_q8_K    * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d = x[i].d;
+        int32_t sumi = 0;
+        for (int j = 0; j < QK8_F8_E4M3; j++) {
+            uint8_t v = x[i].q[j];
+            uint32_t sign = (v >> 7) & 1;
+            uint32_t exp  = (v >> 3) & 0xF;
+            uint32_t mant = v & 0x7;
+            float fv;
+            if (exp == 0) {
+                fv = ldexpf((float)mant / 8.0f, 1 - 7);
+            } else if (exp == 15) {
+                fv = 0.0f;
+            } else {
+                fv = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
+            }
+            if (sign) fv = -fv;
+            fv *= d;
+            sumi += (int)(fv * y[i].qs[j]);
+        }
+        sumf += y[i].d * (float)sumi;
+    }
+
+    *s = sumf;
+}
 
 void quantize_row_q8_K_generic(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q8_K_ref(x, y, k);

@@ -212,6 +212,7 @@ add_library(ggml-base
             ggml-iso-quant.c
             ggml-iso4-quant.c
             ggml-tequila-quant.c
+            ggml-f8-e4m3-quant.c
             ggml-backend-quant.c
             ggml-quant-caps.c
             gguf.cpp)

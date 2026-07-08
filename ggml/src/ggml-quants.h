@@ -156,6 +156,11 @@ GGML_API void quantize_row_tequila_ref(const float * GGML_RESTRICT x, block_tequ
 GGML_API void dequantize_row_tequila(const block_tequila * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API size_t quantize_stq1_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
 GGML_API size_t quantize_tequila(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+
+// F8_E4M3: FP8 E4M3, per-block fp32 scale (LeptoQuant)
+GGML_API void quantize_row_f8_e4m3_ref(const float * GGML_RESTRICT x, block_f8_e4m3 * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_f8_e4m3(const block_f8_e4m3 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API size_t quantize_f8_e4m3(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
 #ifdef __cplusplus
 }
 #endif

@@ -385,6 +385,7 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
             case GGML_TYPE_TQ1_0:
             case GGML_TYPE_TQ2_0:   return_type = GGML_TYPE_Q4_0;   break;
             case GGML_TYPE_STQ1_0:   return_type = GGML_TYPE_Q4_0;   break;
+            case GGML_TYPE_F8_E4M3:   return_type = GGML_TYPE_F16;   break;
             case GGML_TYPE_Q4_K:    return_type = GGML_TYPE_Q5_0;   break;
             case GGML_TYPE_Q5_K:    return_type = GGML_TYPE_Q5_1;   break;
             case GGML_TYPE_Q6_K:    return_type = GGML_TYPE_Q8_0;   break;
@@ -481,7 +482,7 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS) {
                 new_type = GGML_TYPE_IQ3_S;
             }
-            else if (ftype == LLAMA_FTYPE_MOSTLY_TQ1_0 || ftype == LLAMA_FTYPE_MOSTLY_TQ2_0 || ftype == LLAMA_FTYPE_MOSTLY_STQ1_0 || ftype == LLAMA_FTYPE_MOSTLY_TEQUILA) {
+            else if (ftype == LLAMA_FTYPE_MOSTLY_TQ1_0 || ftype == LLAMA_FTYPE_MOSTLY_TQ2_0 || ftype == LLAMA_FTYPE_MOSTLY_STQ1_0 || ftype == LLAMA_FTYPE_MOSTLY_TEQUILA || ftype == LLAMA_FTYPE_MOSTLY_F8_E4M3) {
                 new_type = GGML_TYPE_Q4_K;
             }
         }
@@ -819,7 +820,8 @@ ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_TQ1_0:   return GGML_TYPE_TQ1_0;
         case LLAMA_FTYPE_MOSTLY_TQ2_0:   return GGML_TYPE_TQ2_0;
         case LLAMA_FTYPE_MOSTLY_STQ1_0:  return GGML_TYPE_STQ1_0;
-        case LLAMA_FTYPE_MOSTLY_TQ3_1S:  return GGML_TYPE_TQ3_1S;
+        case LLAMA_FTYPE_MOSTLY_F8_E4M3: return GGML_TYPE_F8_E4M3;
+        case LLAMA_FTYPE_MOSTLY_TEQUILA: return GGML_TYPE_TEQUILA;
         case LLAMA_FTYPE_MOSTLY_TQ4_1S:  return GGML_TYPE_TQ4_1S;
         case LLAMA_FTYPE_MOSTLY_IQ2_XXS: return GGML_TYPE_IQ2_XXS;
         case LLAMA_FTYPE_MOSTLY_IQ2_XS:  return GGML_TYPE_IQ2_XS;
