@@ -4217,9 +4217,52 @@ int32_t llama_feed_hidden_state(
         return -1;
     }
 
-    // Prepare a batch using the hidden state as input embeddings
-    // This requires the drafter to support receiving hidden states directly
-    // For now, this is a placeholder that returns the number of tokens processed
+    const struct llama_model * model_drafter = llama_get_model(ctx_drafter);
+    const int32_t n_embd_drafter = llama_model_n_embd(model_drafter);
+
+    if (state->n_embd != n_embd_drafter) {
+        LLAMA_LOG_ERROR("%s: hidden state embedding dimension %d does not match drafter model dimension %d\n",
+                __func__, state->n_embd, n_embd_drafter);
+        return -2;
+    }
+
+    if (n_tokens <= 0) {
+        return n_tokens;
+    }
+
+    struct llama_batch batch = {
+        /*n_tokens =*/ n_tokens,
+        /*token    =*/ nullptr,
+        /*embd     =*/ const_cast<float *>(state->data),
+        /*pos      =*/ (llama_pos *)   malloc(sizeof(llama_pos)      * n_tokens),
+        /*n_seq_id =*/ (int32_t *)     malloc(sizeof(int32_t)        * n_tokens),
+        /*seq_id   =*/ (llama_seq_id **)malloc(sizeof(llama_seq_id *) * (n_tokens + 1)),
+        /*logits   =*/ (int8_t *)      malloc(sizeof(int8_t)         * n_tokens),
+    };
+
+    for (int32_t i = 0; i < n_tokens; i++) {
+        batch.pos[i]      = i;
+        batch.n_seq_id[i]  = 1;
+        batch.seq_id[i]    = (llama_seq_id *)malloc(sizeof(llama_seq_id));
+        batch.seq_id[i][0] = 0;
+        batch.logits[i]    = 1;
+    }
+    batch.seq_id[n_tokens] = nullptr;
+
+    int32_t result = llama_decode(ctx_drafter, batch);
+
+    for (int32_t i = 0; i < n_tokens; i++) {
+        free(batch.seq_id[i]);
+    }
+    free(batch.pos);
+    free(batch.n_seq_id);
+    free(batch.seq_id);
+    free(batch.logits);
+
+    if (result != 0) {
+        return -1;
+    }
+
     return n_tokens;
 }
 

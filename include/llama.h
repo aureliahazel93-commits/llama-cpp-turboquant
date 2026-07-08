@@ -1586,6 +1586,23 @@ extern "C" {
             ggml_opt_epoch_callback   callback_train,
             ggml_opt_epoch_callback   callback_eval);
 
+//
+// Hidden state API for Eagle3-style speculative decoding.
+//
+// The flow is:
+//   1. Decode tokens on the target model with llama_set_embeddings(ctx_target, true)
+//      so that hidden states are produced instead of logits.
+//   2. Extract the hidden state with llama_get_hidden_state(ctx_target).
+//   3. Feed it into the drafter model with llama_feed_hidden_state(ctx_drafter, state, n_tokens).
+//      The hidden state embedding dimension must match the drafter model's dimension.
+//   4. Sample from the drafter's logits to produce draft tokens.
+//   5. Verify draft tokens against the target model.
+//
+// The hidden state struct carries a zero-copy pointer to embedding data from the target
+// context. The data remains valid only while the target context's embeddings are not
+// overwritten by a subsequent decode call.
+//
+
 struct llama_hidden_state {
     const float * data;
     int32_t n_tokens;
@@ -1593,11 +1610,21 @@ struct llama_hidden_state {
     int32_t n_layer;
 };
 
+// Extract the current hidden state (embedding output) from the target context.
+// The caller must have set embeddings=true before the most recent decode.
+// Returns nullptr on invalid context. The returned state must be freed with llama_hidden_state_free().
 GGML_API struct llama_hidden_state * llama_get_hidden_state(struct llama_context * ctx);
+
+// Feed a hidden state into the drafter context as input embeddings and run decode.
+// The hidden state's n_embd must match llama_model_n_embd() of the drafter model.
+// Returns n_tokens on success, -1 on null/decode failure, -2 on dimension mismatch.
 GGML_API int32_t llama_feed_hidden_state(
         struct llama_context           * ctx_drafter,
         const struct llama_hidden_state * state,
         int32_t                         n_tokens);
+
+// Free a hidden state struct obtained from llama_get_hidden_state().
+// Does not free the data pointer (it is owned by the context).
 GGML_API void llama_hidden_state_free(struct llama_hidden_state * state);
 
 #ifdef __cplusplus
