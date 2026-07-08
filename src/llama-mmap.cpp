@@ -625,6 +625,15 @@ void * llama_mmap::addr() const { return pimpl->addr; }
 
 void llama_mmap::unmap_fragment(size_t first, size_t last) { pimpl->unmap_fragment(first, last); }
 
+size_t llama_mmap::register_host(size_t offset, size_t size, bool (*reg_fn)(void *, size_t), void (*unreg_fn)(void *)) {
+    if (!reg_fn || offset >= pimpl->size) return 0;
+    size_t end = std::min(offset + size, pimpl->size);
+    size_t len = end - offset;
+    void * ptr = (uint8_t *)pimpl->addr + offset;
+    if (reg_fn(ptr, len)) return len;
+    return 0;
+}
+
 #if defined(_POSIX_MEMLOCK_RANGE) || defined(_WIN32)
 const bool llama_mmap::SUPPORTED  = true;
 #else

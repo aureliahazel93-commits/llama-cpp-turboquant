@@ -49,6 +49,7 @@ struct llama_mmap {
     void * addr() const;
 
     void unmap_fragment(size_t first, size_t last);
+    size_t register_host(size_t offset, size_t size, bool (*reg_fn)(void *, size_t), void (*unreg_fn)(void *));
 
     static const bool SUPPORTED;
 

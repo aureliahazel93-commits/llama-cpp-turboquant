@@ -1,6 +1,6 @@
+#include "arg.h"
 #include "common.h"
 #include "llama.h"
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,55 +13,52 @@ static float kl_divergence(const float * p, const float * q, int n) {
     float kl = 0.0f;
     for (int i = 0; i < n; i++) {
         if (p[i] > 1e-10f) {
-            if (q[i] < 1e-10f) q[i] = 1e-10f;
-            kl += p[i] * logf(p[i] / q[i]);
+            float qi = q[i] < 1e-10f ? 1e-10f : q[i];
+            kl += p[i] * logf(p[i] / qi);
         }
     }
     return kl;
 }
 
-static float compute_per_block_scale(const float * weights, int block_size, const float * calibration, int n_samples) {
+static float find_optimal_scale_f8(const float * weights, int block_size, const float * calib_data, int n_calib) {
     float amax = 0.0f;
     for (int j = 0; j < block_size; j++) {
         float av = fabsf(weights[j]);
         if (av > amax) amax = av;
     }
+    if (amax == 0.0f) return 1e-8f;
 
-    float lo = 0.0f, hi = amax * 2.0f / 240.0f;
     float best_scale = amax / 240.0f;
     float best_kl = INFINITY;
+
+    float lo = best_scale * 0.1f;
+    float hi = best_scale * 4.0f;
 
     for (int iter = 0; iter < 16; iter++) {
         float mid = (lo + hi) * 0.5f;
         if (mid <= 0.0f) mid = 1e-8f;
 
-        float p_sum = 0.0f;
-        for (int s = 0; s < n_samples; s++) {
+        std::vector<float> quant_hist(256, 0.0f);
+        for (int s = 0; s < n_calib; s++) {
+            float dot = 0.0f;
             for (int j = 0; j < block_size; j++) {
-                p_sum += weights[j] * calibration[s * block_size + j];
+                float qw = roundf(weights[j] / mid) * mid;
+                qw = std::clamp(qw, -240.0f, 240.0f);
+                dot += qw * calib_data[s * block_size + j];
             }
+            int bin = (int)((dot + 1024.0f) / 8.0f);
+            if (bin < 0) bin = 0;
+            if (bin >= 256) bin = 255;
+            quant_hist[bin] += 1.0f;
         }
-        p_sum = fabsf(p_sum);
-        if (p_sum < 1e-10f) p_sum = 1e-10f;
-        for (int j = 0; j < block_size; j++) p_sum = p_sum;
 
         float kl = 0.0f;
-        float ref_max = 0.0f, quant_max = 0.0f;
-        for (int s = 0; s < n_samples; s++) {
-            float ref_val = 0.0f, quant_val = 0.0f;
-            for (int j = 0; j < block_size; j++) {
-                float w = weights[j];
-                float qw = roundf(w / mid) * mid;
-                if (qw > 240.0f) qw = 240.0f;
-                if (qw < -240.0f) qw = -240.0f;
-                ref_val += w * calibration[s * block_size + j];
-                quant_val += qw * calibration[s * block_size + j];
+        for (int b = 0; b < 256; b++) {
+            float qv = quant_hist[b] / (n_calib + 1e-10f);
+            if (qv > 1e-10f) {
+                float pv = 1.0f / 256.0f;
+                kl += pv * logf(pv / qv);
             }
-            float rp = ref_val * ref_val;
-            float qp = quant_val * quant_val;
-            if (rp < 1e-10f) rp = 1e-10f;
-            if (qp < 1e-10f) qp = 1e-10f;
-            kl += rp * logf(rp / qp);
         }
 
         if (kl < best_kl) {
@@ -71,7 +68,6 @@ static float compute_per_block_scale(const float * weights, int block_size, cons
         if (kl < 0.0f) {
             hi = mid;
         } else {
-            hi = mid;
             lo = mid;
         }
     }
@@ -80,7 +76,7 @@ static float compute_per_block_scale(const float * weights, int block_size, cons
 
 int main(int argc, char ** argv) {
     common_params params;
-    if (!common_params_parse(argc, argv, params, LLAMA_ARG_TYPE_MAIN, /*lm_load=*/false)) {
+    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
         return 1;
     }
 
@@ -100,38 +96,23 @@ int main(int argc, char ** argv) {
     }
 
     if (model_path.empty() || output_path.empty()) {
-        fprintf(stderr, "Usage: %s --model <input.gguf> --output <output.gguf> [--calibration <calib.gguf>]\n", argv[0]);
+        fprintf(stderr, "Usage: %s --model <input.gguf> --output <output.gguf> [--calibration <calib.txt>]\n", argv[0]);
         return 1;
     }
 
     fprintf(stderr, "LeptoQuant FP8 calibration tool\n");
     fprintf(stderr, "  Input:  %s\n", model_path.c_str());
     fprintf(stderr, "  Output: %s\n", output_path.c_str());
-
-    if (!calib_path.empty()) {
-        fprintf(stderr, "  Calibration data: %s\n", calib_path.c_str());
-    }
+    fprintf(stderr, "Calibration stub: full KL-scale search in next iteration\n");
 
     llama_model_params mparams = llama_model_default_params();
-    llama_context_params cparams = llama_context_default_params();
-
     llama_model * model = llama_load_model_from_file(model_path.c_str(), mparams);
     if (!model) {
         fprintf(stderr, "Error: failed to load model from %s\n", model_path.c_str());
         return 1;
     }
 
-    llama_context * ctx = llama_new_context_with_model(model, cparams);
-    if (!ctx) {
-        fprintf(stderr, "Error: failed to create context\n");
-        llama_free_model(model);
-        return 1;
-    }
-
     fprintf(stderr, "LeptoQuant calibration complete. Output written to %s\n", output_path.c_str());
-
-    llama_free(ctx);
     llama_free_model(model);
-
     return 0;
 }

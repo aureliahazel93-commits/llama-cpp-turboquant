@@ -526,6 +526,7 @@ struct common_params {
     size_t multiple_choice_tasks = 0; // number of tasks to use when computing the TruthfulQA score. If 0, all tasks will be computed
 
     bool   kl_divergence    = false; // compute KL divergence
+    std::string kl_reference;        // reference model path for KL comparison
 
     bool check             = false; // check rather than generate results for llama-results
 
