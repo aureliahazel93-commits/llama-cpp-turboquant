@@ -652,6 +652,64 @@ llama_ubatch llama_batch_allocr::split_seq(uint32_t n_ubatch) {
     return ubatch_add(idxs, 1, true);
 }
 
+llama_ubatch llama_batch_allocr::split_mixed(
+        const std::vector<llama_token> & prefill_tokens,
+        llama_seq_id                  prefill_seq_id,
+        llama_pos                     prefill_pos_start,
+        const std::vector<llama_seq_id> & decode_seq_ids,
+        const std::vector<llama_pos>   & decode_positions,
+        const std::vector<llama_token> & decode_tokens,
+        uint32_t                       n_ubatch) {
+    const uint32_t n_prefill = std::min((uint32_t)prefill_tokens.size(), n_ubatch);
+    const uint32_t n_decode  = std::min((uint32_t)decode_tokens.size(), n_ubatch - n_prefill);
+    const uint32_t n_tokens  = n_prefill + n_decode;
+    if (n_tokens == 0) return {};
+
+    auto data = std::make_shared<llama_ubatch::data_t>();
+    data->token.reserve(n_tokens);
+    data->pos.reserve(n_tokens);
+    data->n_seq_id.reserve(n_tokens);
+    data->seq_id_data.reserve(n_tokens);
+    data->seq_id.reserve(n_tokens);
+    data->output.reserve(n_tokens);
+
+    for (uint32_t i = 0; i < n_prefill; i++) {
+        data->token.push_back(prefill_tokens[i]);
+        data->pos.push_back(prefill_pos_start + i);
+        data->n_seq_id.push_back(1);
+        data->seq_id_data.push_back(prefill_seq_id);
+        data->output.push_back(i == n_prefill - 1 ? 1 : 0);
+    }
+
+    for (uint32_t i = 0; i < n_decode; i++) {
+        data->token.push_back(decode_tokens[i]);
+        data->pos.push_back(decode_positions[i]);
+        data->n_seq_id.push_back(1);
+        data->seq_id_data.push_back(decode_seq_ids[i]);
+        data->output.push_back(1);
+    }
+
+    data->seq_id.resize(n_tokens);
+    for (uint32_t i = 0; i < n_tokens; i++) {
+        data->seq_id[i] = &data->seq_id_data[i];
+    }
+
+    llama_ubatch ubatch = {};
+    ubatch.b_equal_seqs = 0;
+    ubatch.n_tokens     = n_tokens;
+    ubatch.n_seq_tokens = 1;
+    ubatch.n_seqs       = n_decode + (n_prefill > 0 ? 1 : 0);
+    ubatch.n_pos        = n_pos_per_embd;
+    ubatch.token        = data->token.data();
+    ubatch.pos          = data->pos.data();
+    ubatch.n_seq_id     = data->n_seq_id.data();
+    ubatch.seq_id       = data->seq_id.data();
+    ubatch.output       = data->output.data();
+    ubatch.data         = std::move(data);
+
+    return ubatch;
+}
+
 void llama_batch_allocr::clear() {
     n_outputs = 0;
 
@@ -916,4 +974,17 @@ void llama_batch_free(struct llama_batch batch) {
         free(batch.seq_id);
     }
     if (batch.logits)   free(batch.logits);
+}
+
+struct llama_batch llama_batch_init_mixed(int32_t n_tokens) {
+    struct llama_batch batch = {
+        /*n_tokens    =*/ n_tokens,
+        /*token       =*/ (llama_token *)  calloc(n_tokens, sizeof(llama_token)),
+        /*embd        =*/ nullptr,
+        /*pos         =*/ (llama_pos *)    calloc(n_tokens, sizeof(llama_pos)),
+        /*n_seq_id    =*/ (int32_t *)      calloc(n_tokens, sizeof(int32_t)),
+        /*seq_id      =*/ (llama_seq_id **)calloc(n_tokens, sizeof(llama_seq_id *)),
+        /*logits      =*/ (int8_t *)       calloc(n_tokens, sizeof(int8_t)),
+    };
+    return batch;
 }

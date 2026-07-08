@@ -789,6 +789,14 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) dequantize_row_tq4_1s,
         .from_float_ref           = (ggml_from_float_t) quantize_row_tq4_1s_ref,
     },
+    [GGML_TYPE_NAUTILUS3_0] = {
+        .type_name                = "nautilus3",
+        .blck_size                = NAUTILUS_D,
+        .type_size                = sizeof(block_nautilus3_0),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_nautilus3_0,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_nautilus3_0_ref,
+    },
     [GGML_TYPE_Q2_K] = {
         .type_name                = "q2_K",
         .blck_size                = QK_K,
@@ -969,9 +977,15 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
     },
 };
 
+const struct ggml_type_traits * ggml_get_fork_type_traits(enum ggml_type type);
+
 const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
-    assert(type >= 0);
-    assert(type < GGML_TYPE_COUNT);
+    if (type < 0 || type >= GGML_TYPE_COUNT) {
+        return NULL;
+    }
+    if (GGML_IS_FORK_TYPE(type)) {
+        return ggml_get_fork_type_traits(type);
+    }
     return &type_traits[type];
 }
 
@@ -1093,6 +1107,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
 
     "FLASH_ATTN_EXT",
     "FLASH_ATTN_BACK",
+    "ATTN_PAGED",
     "SSM_CONV",
     "SSM_SCAN",
     "WIN_PART",
@@ -1122,7 +1137,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
+static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1234,7 +1249,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
+static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -1343,40 +1358,35 @@ size_t ggml_nbytes_pad(const struct ggml_tensor * tensor) {
 }
 
 int64_t ggml_blck_size(enum ggml_type type) {
-    assert(type >= 0);
-    assert(type < GGML_TYPE_COUNT);
-    return type_traits[type].blck_size;
+    const struct ggml_type_traits * t = ggml_get_type_traits(type);
+    return t ? t->blck_size : 0;
 }
 
 size_t ggml_type_size(enum ggml_type type) {
-    assert(type >= 0);
-    assert(type < GGML_TYPE_COUNT);
-    return type_traits[type].type_size;
+    const struct ggml_type_traits * t = ggml_get_type_traits(type);
+    return t ? t->type_size : 0;
 }
 
 size_t ggml_row_size(enum ggml_type type, int64_t ne) {
-    assert(type >= 0);
-    assert(type < GGML_TYPE_COUNT);
-    assert(ne % ggml_blck_size(type) == 0);
-    return ggml_type_size(type)*ne/ggml_blck_size(type);
+    const int64_t bs = ggml_blck_size(type);
+    assert(bs > 0 && ne % bs == 0);
+    return ggml_type_size(type)*ne/bs;
 }
 
 double ggml_type_sizef(enum ggml_type type) {
-    assert(type >= 0);
-    assert(type < GGML_TYPE_COUNT);
-    return ((double)(type_traits[type].type_size))/type_traits[type].blck_size;
+    const struct ggml_type_traits * t = ggml_get_type_traits(type);
+    if (!t || t->blck_size == 0) return 0.0;
+    return ((double)(t->type_size))/t->blck_size;
 }
 
 const char * ggml_type_name(enum ggml_type type) {
-    assert(type >= 0);
-    assert(type < GGML_TYPE_COUNT);
-    return type_traits[type].type_name;
+    const struct ggml_type_traits * t = ggml_get_type_traits(type);
+    return t ? t->type_name : "(unknown)";
 }
 
 bool ggml_is_quantized(enum ggml_type type) {
-    assert(type >= 0);
-    assert(type < GGML_TYPE_COUNT);
-    return type_traits[type].is_quantized;
+    const struct ggml_type_traits * t = ggml_get_type_traits(type);
+    return t ? t->is_quantized : false;
 }
 
 const char * ggml_op_name(enum ggml_op op) {
@@ -1776,7 +1786,7 @@ static struct ggml_tensor * ggml_new_tensor_impl(
         struct ggml_tensor  * view_src,
         size_t                view_offs) {
 
-    GGML_ASSERT(type >= 0 && type < GGML_TYPE_COUNT);
+    GGML_ASSERT(type >= 0 && type < GGML_TYPE_COUNT && ggml_get_type_traits(type) != NULL);
     GGML_ASSERT(n_dims >= 1 && n_dims <= GGML_MAX_DIMS);
 
     // find the base tensor and absolute offset
@@ -5555,6 +5565,40 @@ struct ggml_tensor * ggml_flash_attn_back(
     return result;
 }
 
+// ggml_attention_paged
+struct ggml_tensor * ggml_attention_paged(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k_blocks,
+        struct ggml_tensor  * v_blocks,
+        struct ggml_tensor  * block_table,
+        struct ggml_tensor  * seq_lens,
+        struct ggml_tensor  * mask,
+        float                 scale,
+        float                 max_bias,
+        float                 logit_softcap) {
+    GGML_ASSERT(ggml_can_mul_mat(k_blocks, q));
+
+    GGML_ASSERT(q->ne[3] == k_blocks->ne[3]);
+    GGML_ASSERT(k_blocks->ne[3] == v_blocks->ne[3]);
+
+    int64_t ne[4] = { q->ne[0], q->ne[1], q->ne[2], block_table->ne[1] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    float params[] = { scale, max_bias, logit_softcap };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_ATTN_PAGED;
+    result->src[0] = q;
+    result->src[1] = k_blocks;
+    result->src[2] = v_blocks;
+    result->src[3] = block_table;
+    result->src[4] = seq_lens;
+    result->src[5] = mask;
+
+    return result;
+}
+
 // ggml_ssm_conv
 
 struct ggml_tensor * ggml_ssm_conv(
@@ -7834,6 +7878,7 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_TURBO2_0: result = quantize_turbo2_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_TQ3_1S:  result = quantize_tq3_1s(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_TQ4_1S:  result = quantize_tq4_1s(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_NAUTILUS3_0: result = quantize_nautilus3_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_F16:
             {
                 size_t elemsize = sizeof(ggml_fp16_t);

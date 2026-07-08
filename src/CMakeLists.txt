@@ -18,8 +18,21 @@ add_library(llama
             llama-context.cpp
             llama-cparams.cpp
             llama-grammar.cpp
-            llama-graph.cpp
-            llama-hparams.cpp
+             llama-graph.cpp
+             llama-kv-cache-paged.cpp
+             llama-prefix-cache.cpp
+             llama-scheduler.cpp
+             llama-scheduler-overlap.cpp
+             llama-scheduler-cache-aware.cpp
+             llama-grammar-jump.cpp
+             llama-grammar-xgrammar.cpp
+             llama-speculative-tree.cpp
+             llama-speculative-saguaro.cpp
+             llama-speculative-sampling.cpp
+             llama-speculative-phantom.cpp
+             llama-ngram-corpus.cpp
+             llama-phantom-scaler.cpp
+             llama-hparams.cpp
             llama-impl.cpp
             llama-io.cpp
             llama-kv-cache.cpp

@@ -55,7 +55,9 @@ void main() {
     const uint nb = K / 32;  // number of Q4_0 blocks per row
 
     // Each subgroup processes one output element (row, col)
-    // 32 lanes cooperatively process 32 weights per block
+    float total_sum = 0.0;
+    const uint w_max = pc.M * pc.w_stride > 0 ? pc.M * pc.w_stride - 1 : 0;
+    const uint a_max = pc.N * pc.K > 0 ? pc.N * pc.K - 1 : 0;
     float total_sum = 0.0;
 
     for (uint b = 0; b < nb; b++) {
@@ -63,15 +65,15 @@ void main() {
         uint block_offset = row * pc.w_stride + b * 18;
 
         // Load scale (fp16) — broadcast to all lanes via subgroup shuffle
-        uint d_lo = uint(weights[block_offset]);
-        uint d_hi = uint(weights[block_offset + 1]);
+        uint d_lo = uint(weights[min(block_offset, w_max)]);
+        uint d_hi = uint(weights[min(block_offset + 1, w_max)]);
         float d = unpackHalf2x16(d_lo | (d_hi << 16)).x;
         d = subgroupShuffle(d, 0);  // lane 0 broadcasts to all
 
         // Each lane loads its nibble from the 16-byte qs array
         // 32 nibbles packed into 16 bytes: lane i → byte i/2, nibble (i%2)*4
         uint byte_idx = lane / 2;
-        uint qs_word = weights[block_offset + 2 + (byte_idx / 4)];
+        uint qs_word = weights[min(block_offset + 2 + (byte_idx / 4), w_max)];
         uint qs_bp   = (byte_idx % 4) * 8;
         uint raw = (qs_word >> qs_bp) & 0xFF;
         uint shift   = (lane % 2) * 4;
@@ -80,7 +82,7 @@ void main() {
         float w = d * float(int(nibble) - 8);
 
         // Load activation for this lane's k position
-        float x = activations[col * pc.K + b * 32 + lane];
+        float x = activations[min(col * pc.K + b * 32 + lane, a_max)];
 
         // Per-lane product
         float partial = w * x;
@@ -96,6 +98,6 @@ void main() {
 
     // Lane 0 writes the final result
     if (lane == 0) {
-        output[row * pc.N + col] = total_sum;
+        output[min(row * pc.N + col, pc.M * pc.N > 0 ? pc.M * pc.N - 1 : 0)] = total_sum;
     }
 }

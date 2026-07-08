@@ -7,6 +7,7 @@
 #include "ggml.h"
 #include "unary-ops.h"
 #include "vec.h"
+#include "ggml-fork-types.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -2228,6 +2229,20 @@ static void ggml_compute_forward_gelu(
             } break;
         default:
             {
+                if (ggml_is_quantized(src0->type)) {
+                    const int64_t nr = ggml_nrows(src0);
+                    const int64_t nc = src0->ne[0];
+                    const int64_t bs = ggml_blck_size(src0->type);
+                    const int64_t nrb = (nc + bs - 1) / bs;
+                    const size_t row_bytes = nrb * ggml_type_size(src0->type);
+                    float * wbuf = (float *) params->wdata;
+                    for (int64_t r = 0; r < nr; r++) {
+                        const char * row_src = (const char *) src0->data + r * row_bytes;
+                        ggml_fork_dequant_to_f32(src0->type, row_src, wbuf, 1, nc);
+                        ggml_vec_gelu_f32(nc, (float *) dst->data + r * nc, wbuf);
+                    }
+                    break;
+                }
                 GGML_ABORT("fatal error");
             }
     }
@@ -2287,7 +2302,7 @@ void ggml_compute_forward_fill(const ggml_compute_params * params, ggml_tensor *
             } break;
         default:
             {
-                GGML_ABORT("unsupported type for ggml_compute_forward_fill: %s", ggml_type_name(src0->type));
+                ggml_compute_forward_fill_f32(params, dst);
             }
     }
 }
@@ -2458,6 +2473,20 @@ static void ggml_compute_forward_gelu_erf(
             } break;
         default:
             {
+                if (ggml_is_quantized(src0->type)) {
+                    const int64_t nr = ggml_nrows(src0);
+                    const int64_t nc = src0->ne[0];
+                    const int64_t bs = ggml_blck_size(src0->type);
+                    const int64_t nrb = (nc + bs - 1) / bs;
+                    const size_t row_bytes = nrb * ggml_type_size(src0->type);
+                    float * wbuf = (float *) params->wdata;
+                    for (int64_t r = 0; r < nr; r++) {
+                        const char * row_src = (const char *) src0->data + r * row_bytes;
+                        ggml_fork_dequant_to_f32(src0->type, row_src, wbuf, 1, nc);
+                        ggml_vec_gelu_erf_f32(nc, (float *) dst->data + r * nc, wbuf);
+                    }
+                    break;
+                }
                 GGML_ABORT("fatal error");
             }
     }
@@ -2577,6 +2606,20 @@ static void ggml_compute_forward_gelu_quick(
             } break;
         default:
             {
+                if (ggml_is_quantized(src0->type)) {
+                    const int64_t nr = ggml_nrows(src0);
+                    const int64_t nc = src0->ne[0];
+                    const int64_t bs = ggml_blck_size(src0->type);
+                    const int64_t nrb = (nc + bs - 1) / bs;
+                    const size_t row_bytes = nrb * ggml_type_size(src0->type);
+                    float * wbuf = (float *) params->wdata;
+                    for (int64_t r = 0; r < nr; r++) {
+                        const char * row_src = (const char *) src0->data + r * row_bytes;
+                        ggml_fork_dequant_to_f32(src0->type, row_src, wbuf, 1, nc);
+                        ggml_vec_gelu_quick_f32(nc, (float *) dst->data + r * nc, wbuf);
+                    }
+                    break;
+                }
                 GGML_ABORT("fatal error");
             }
     }
@@ -2696,6 +2739,20 @@ static void ggml_compute_forward_silu(
             } break;
         default:
             {
+                if (ggml_is_quantized(src0->type)) {
+                    const int64_t nr = ggml_nrows(src0);
+                    const int64_t nc = src0->ne[0];
+                    const int64_t bs = ggml_blck_size(src0->type);
+                    const int64_t nrb = (nc + bs - 1) / bs;
+                    const size_t row_bytes = nrb * ggml_type_size(src0->type);
+                    float * wbuf = (float *) params->wdata;
+                    for (int64_t r = 0; r < nr; r++) {
+                        const char * row_src = (const char *) src0->data + r * row_bytes;
+                        ggml_fork_dequant_to_f32(src0->type, row_src, wbuf, 1, nc);
+                        ggml_vec_silu_f32(nc, (float *) dst->data + r * nc, wbuf);
+                    }
+                    break;
+                }
                 GGML_ABORT("fatal error");
             }
     }
@@ -2779,6 +2836,22 @@ void ggml_compute_forward_leaky_relu(
             } break;
         default:
             {
+                if (ggml_is_quantized(src0->type)) {
+                    float negative_slope;
+                    memcpy(&negative_slope, dst->op_params, sizeof(float));
+                    const int64_t nr = ggml_nrows(src0);
+                    const int64_t nc = src0->ne[0];
+                    const int64_t bs = ggml_blck_size(src0->type);
+                    const int64_t nrb = (nc + bs - 1) / bs;
+                    const size_t row_bytes = nrb * ggml_type_size(src0->type);
+                    float * wbuf = (float *) params->wdata;
+                    for (int64_t r = 0; r < nr; r++) {
+                        const char * row_src = (const char *) src0->data + r * row_bytes;
+                        ggml_fork_dequant_to_f32(src0->type, row_src, wbuf, 1, nc);
+                        ggml_vec_leaky_relu_f32(nc, (float *) dst->data + r * nc, wbuf, negative_slope);
+                    }
+                    break;
+                }
                 GGML_ABORT("fatal error");
             }
     }
@@ -9454,6 +9527,7 @@ void ggml_compute_forward_flash_attn_back(
 }
 
 // ggml_compute_forward_ssm_conv
+
 
 static void ggml_compute_forward_ssm_conv_f32(
         const ggml_compute_params * params,

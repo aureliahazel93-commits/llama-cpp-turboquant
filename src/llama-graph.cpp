@@ -3292,3 +3292,18 @@ int32_t llama_relative_position_bucket(llama_pos x, llama_pos y, uint64_t n_buck
 
     return relative_bucket;
 }
+
+ggml_tensor * llama_graph_insert_all_gather(
+        struct ggml_context * ctx,
+        struct ggml_cgraph * graph,
+        ggml_tensor * attn_output,
+        int32_t n_ranks) {
+    if (n_ranks <= 1) {
+        return attn_output;
+    }
+
+    ggml_tensor * result = ggml_sum_rows(ctx, attn_output);
+    ggml_set_name(result, "all_gather_attn");
+    ggml_build_forward_expand(graph, result);
+    return result;
+}

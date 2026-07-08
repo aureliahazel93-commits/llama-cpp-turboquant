@@ -1,0 +1,38 @@
+// Fork quant types — IDs allocate DOWNWARD from 255
+// Upstream grows upward from 0. Gap between them is merge safety buffer.
+// Next available fork ID: 242 (NAUTILUS3_0=243 is current floor)
+// DO NOT add types above 243 without checking for upstream collision
+
+#ifndef GGML_QUANT_REGISTRY_DEF
+#define GGML_QUANT_REGISTRY_DEF
+
+// Rotation method constants
+#define ROTATION_NONE           0
+#define ROTATION_QUATERNION     1
+#define ROTATION_GIVENS_2D      2
+#define ROTATION_GOLDEN_GIVENS   3
+#define ROTATION_WHT            4
+
+// X-macro: expands each fork quant type into enum entries, declarations, and type_traits
+// Usage: #define GGML_QUANT_TYPE(suffix, type_id, block_struct, block_size, type_size, is_quantized, has_simd, is_available, needs_rotation, rotation_method)
+//        #include "ggml-quant-registry.def"
+//        #undef GGML_QUANT_TYPE
+
+#define GGML_QUANT_TYPE(enum_suffix, type_id, block_struct, block_size_elems, type_size_bytes, is_quantized, has_simd, is_available, needs_rotation, rotation_method) \
+    GGML_TYPE_##enum_suffix = type_id,
+
+GGML_QUANT_TYPE(F8_E4M3,       255, block_f8_e4m3,       1,   1, 1, 0, 1, 0, ROTATION_NONE)
+GGML_QUANT_TYPE(TEQUILA,       254, block_tequila,      32,  16, 1, 0, 1, 0, ROTATION_NONE)
+GGML_QUANT_TYPE(STQ1_0,        253, block_stq1_0,       32,  16, 1, 0, 1, 0, ROTATION_NONE)
+GGML_QUANT_TYPE(ISO4_0,        252, block_iso4_0,       128, 56, 1, 0, 1, 1, ROTATION_QUATERNION)
+GGML_QUANT_TYPE(PLANAR4_0,     251, block_planar4_0,    128, 56, 1, 0, 1, 1, ROTATION_GIVENS_2D)
+GGML_QUANT_TYPE(ISO3_0,        250, block_iso3_0,       128, 44, 1, 0, 1, 1, ROTATION_QUATERNION)
+GGML_QUANT_TYPE(PLANAR3_0,     249, block_planar3_0,    128, 44, 1, 0, 1, 1, ROTATION_GIVENS_2D)
+GGML_QUANT_TYPE(TURBO4_0,      246, block_turbo4_0,     128, 56, 1, 0, 1, 1, ROTATION_WHT)
+GGML_QUANT_TYPE(TURBO3_0,      245, block_turbo3_0,     128, 44, 1, 0, 1, 1, ROTATION_WHT)
+GGML_QUANT_TYPE(TURBO2_0,      244, block_turbo2_0,     128, 32, 1, 0, 1, 1, ROTATION_WHT)
+GGML_QUANT_TYPE(NAUTILUS3_0,   243, block_nautilus3_0,  128, 14, 1, 0, 1, 1, ROTATION_GOLDEN_GIVENS)
+
+#undef GGML_QUANT_TYPE
+
+#endif // GGML_QUANT_REGISTRY_DEF

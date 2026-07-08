@@ -1,0 +1,27 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer readonly { float target_logits[]; };
+layout(set = 0, binding = 1) buffer readonly { uint draft_tokens[]; };
+layout(set = 0, binding = 2) buffer writeonly { uint accepted_mask[]; };
+
+layout(push_constant) uniform Params {
+    uint n_positions;
+    uint n_vocab;
+    uint n_draft;
+};
+
+void main() {
+    uint pos = gl_GlobalInvocationID.x;
+    if (pos >= n_draft) return;
+    float best_logit = -1e30f;
+    uint best_idx = 0;
+    uint base = pos * n_vocab;
+    for (uint v = 0; v < n_vocab; v++) {
+        if (target_logits[base + v] > best_logit) {
+            best_logit = target_logits[base + v];
+            best_idx = v;
+        }
+    }
+    accepted_mask[pos] = (best_idx == draft_tokens[pos]) ? 1u : 0u;
+}

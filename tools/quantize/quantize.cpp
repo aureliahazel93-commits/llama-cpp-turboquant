@@ -72,7 +72,11 @@ static const std::vector<quant_option> QUANT_OPTIONS = {
     { "BF16",     LLAMA_FTYPE_MOSTLY_BF16,     "14.00G, -0.0050 ppl @ Mistral-7B",  },
     { "F32",      LLAMA_FTYPE_ALL_F32,         "26.00G              @ 7B",          },
     // Note: Ensure COPY comes after F32 to avoid ftype 0 from matching.
+    { "STQ1_0",   LLAMA_FTYPE_MOSTLY_STQ1_0,   " 1.31 bpw structured ternary" },
+    { "TEQUILA",  LLAMA_FTYPE_MOSTLY_TEQUILA,  " 2.0 bpw deadzone-aware ternary" },
+    { "F8_E4M3",  LLAMA_FTYPE_MOSTLY_F8_E4M3,  " 8.06 bpw FP8 E4M3" },
     { "COPY",     LLAMA_FTYPE_ALL_F32,         "only copy tensors, no quantizing",  },
+    // TODO(Phase 31): add QUANT_OPTIONS entry for Q1_0_G128 (1.125 bpw)
 };
 
 static const char * const LLM_KV_QUANTIZE_IMATRIX_FILE       = "quantize.imatrix.file";

@@ -11,6 +11,24 @@
 #include <stdexcept>
 
 #define MAX_REPETITION_THRESHOLD 2000
+
+// Pluggable grammar backend interface
+enum grammar_backend_type {
+    GRAMMAR_BACKEND_GBNF,       // native GBNF parser (default)
+    GRAMMAR_BACKEND_XGRAMMAR,   // XGrammar (future)
+    GRAMMAR_BACKEND_JUMP_FWD,   // jump-forward FSM (Phase 23)
+};
+
+// Set the active grammar backend
+static grammar_backend_type g_grammar_backend = GRAMMAR_BACKEND_GBNF;
+
+grammar_backend_type llama_get_grammar_backend() {
+    return g_grammar_backend;
+}
+
+void llama_set_grammar_backend(grammar_backend_type backend) {
+    g_grammar_backend = backend;
+}
 //
 // helpers
 //

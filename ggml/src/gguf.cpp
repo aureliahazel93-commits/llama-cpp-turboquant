@@ -1,4 +1,5 @@
 #include "ggml.h"
+#include "ggml-fork-types.h"
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 #include "gguf.h"
@@ -698,9 +699,9 @@ static struct gguf_context * gguf_init_from_reader(const struct gguf_reader & gr
             ok = ok && gr.read(info.t.type);
 
             // check that tensor type is within defined range
-            if (info.t.type < 0 || info.t.type >= GGML_TYPE_COUNT) {
-                GGML_LOG_ERROR("%s: tensor '%s' has invalid ggml type %d. should be in [0, %d)\n",
-                    __func__, info.t.name, info.t.type, GGML_TYPE_COUNT);
+            if (info.t.type < 0 || info.t.type >= GGML_TYPE_COUNT || ggml_get_type_traits(info.t.type) == NULL) {
+                GGML_LOG_ERROR("%s: tensor '%s' has invalid ggml type %d\n",
+                    __func__, info.t.name, info.t.type);
                 ok = false;
                 break;
             }

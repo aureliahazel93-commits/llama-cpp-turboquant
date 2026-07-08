@@ -18,3 +18,8 @@ add_executable(llama-calibrate
 target_include_directories(llama-calibrate PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/ggml/include ${CMAKE_SOURCE_DIR}/ggml/src ${CMAKE_SOURCE_DIR}/tools/stability)
 target_link_libraries(llama-calibrate PRIVATE llama llama-common)
 install(TARGETS llama-calibrate RUNTIME DESTINATION bin)
+
+add_executable(rotorquant-benchmark stability_runner.cpp)
+target_compile_definitions(rotorquant-benchmark PRIVATE STABILITY_MODE_ROTORQUANT)
+target_include_directories(rotorquant-benchmark PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/ggml/include ${CMAKE_SOURCE_DIR}/ggml/src ${CMAKE_SOURCE_DIR}/common ${CMAKE_SOURCE_DIR}/tools/stability)
+target_link_libraries(rotorquant-benchmark PRIVATE llama llama-common)

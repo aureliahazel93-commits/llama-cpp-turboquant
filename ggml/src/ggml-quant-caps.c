@@ -85,6 +85,15 @@ static const struct ggml_quant_caps quant_caps_table[GGML_TYPE_COUNT] = {
         .k_cache_capable  = true,
         .v_cache_capable  = true,
     },
+    [GGML_TYPE_NAUTILUS3_0] = {
+        .needs_wht       = false,   /* golden-ratio Givens, not WHT */
+        .k_cache_capable = true,
+        .v_cache_capable = true,
+        .cpu_fallback_ok = true,
+        .head_align      = 128,
+    },
+    // TODO(Phase 31): [GGML_TYPE_Q1_0_G128] = { .weight_capable=true, .cpu_fallback_ok=true }
+    // Requires GGML_TYPE_COUNT > 256 (registry refactor needed)
 };
 
 const struct ggml_quant_caps * ggml_get_quant_caps(enum ggml_type type) {

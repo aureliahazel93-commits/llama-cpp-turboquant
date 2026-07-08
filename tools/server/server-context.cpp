@@ -20,6 +20,10 @@
 // TODO: tmp until the mtmd draft processing is refactored [TAG_MTMD_DRAFT_PROCESSING]
 #include "../../src/llama-ext.h"
 
+#if defined(LLAMA_USE_SCHEDULER)
+#include "llama-scheduler.h"
+#endif
+
 #include <algorithm>
 #include <cstddef>
 #include <cinttypes>
@@ -2691,6 +2695,9 @@ private:
 
     void update_slots() {
         // check if all slots are idle
+#if defined(LLAMA_USE_SCHEDULER)
+        return;
+#endif
         {
             bool all_idle = true;
 

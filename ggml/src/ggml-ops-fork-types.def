@@ -1,0 +1,11 @@
+// Maps (upstream op × fork quant type) → specialized handler
+// Unregistered pairs fall through to Tier 3 (dequant-to-F32 fallback).
+// Macro: GGML_FORK_TYPE_OP(upstream_op, fork_type_id, handler_fn)
+
+// Matmul fast-paths for fork quant types — priority 1 (dominant inference cost)
+GGML_FORK_TYPE_OP(GGML_OP_MUL_MAT, GGML_TYPE_TURBO2_0,    compute_forward_mul_mat_turbo2_0)
+GGML_FORK_TYPE_OP(GGML_OP_MUL_MAT, GGML_TYPE_TQ4_1S,     compute_forward_mul_mat_tq4_1s)
+
+// Element-wise fast-paths for fork quant types — priority 2
+GGML_FORK_TYPE_OP(GGML_OP_ADD,     GGML_TYPE_TURBO2_0,    compute_forward_add_turbo2_0)
+GGML_FORK_TYPE_OP(GGML_OP_MUL,     GGML_TYPE_TURBO2_0,    compute_forward_mul_turbo2_0)

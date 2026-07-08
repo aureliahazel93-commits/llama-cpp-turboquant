@@ -383,6 +383,25 @@ typedef struct {
     uint8_t   qs[QK_TQ4_1S / 2];      // 16 bytes: 4-bit indices nibble-packed
 } block_tq4_1s;                         // 20 bytes total
 static_assert(sizeof(block_tq4_1s) == 20, "wrong tq4_1s block size");
+// NautilusQuant 3-bit: golden-ratio Givens rotation + 3-bit PolarQuant
+// Same block layout as turbo3_0 (norm + 2-bit indices + 1-bit signs = 14 bytes per 128 values)
+// Rotation: 3-layer Givens with golden-angle theta_k = (2*pi/phi^2)*(k+1)
+// LUT is ~1.9 KB (cos[64] + sin[64]), deterministic, no PRNG, no state
+#define NAUTILUS_D    128       /* rotation group size = head_dim */
+#define NAUTILUS_PAIRS (NAUTILUS_D / 2)  /* 64 Givens pairs per layer */
+typedef struct {
+    ggml_half  norm;                    //  2 bytes: corrected L2 norm (same as turbo3_0)
+    uint8_t    qs[QK_TURBO3 / 4];      //  8 bytes: lower 2-bit indices
+    uint8_t    signs[QK_TURBO3 / 8];   //  4 bytes: upper 1-bit of 3-bit index
+} block_nautilus3_0;
+static_assert(sizeof(block_nautilus3_0) == sizeof(block_turbo3_0), "nautilus3_0 block must match turbo3_0 size");
+
+typedef struct {
+    ggml_half d;
+    uint8_t qs[16];
+} block_q1_0_g128;
+static_assert(sizeof(block_q1_0_g128) == 18, "block_q1_0_g128 size mismatch");
+
 // PlanarQuant 3-bit: 2D Givens rotation + 2-bit quantized + 1-bit signs
 #define QK_PLANAR3 128
 #define NL_PLANAR3 (QK_PLANAR3 / 16)

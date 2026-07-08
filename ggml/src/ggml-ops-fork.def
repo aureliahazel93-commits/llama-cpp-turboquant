@@ -1,0 +1,13 @@
+// Fork operation definitions
+// IDs 128–255 reserved for fork use. Never collide with upstream ops (0–127).
+// Macro: GGML_FORK_OP(enum_suffix, op_id, category, handler_fn)
+
+// Quantization / dequantization operations
+GGML_FORK_OP(DEQUANT_FORK,   128, CUSTOM, compute_forward_dequant_fork)
+GGML_FORK_OP(QUANT_FORK,     129, CUSTOM, compute_forward_quant_fork)
+
+// Custom matmul path for fork quant types
+GGML_FORK_OP(MUL_MAT_FORK,   130, MATMUL, compute_forward_mul_mat_fork)
+
+// Weight-transform operations
+GGML_FORK_OP(WEIGHT_TRANSFORM, 131, CUSTOM, compute_forward_weight_transform)

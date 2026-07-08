@@ -4416,6 +4416,7 @@ class GGMLQuantizationType(IntEnum):
     Q1_0    = 41
     TQ3_1S  = 45
     TQ4_1S  = 46
+    # TODO(Phase 31): Q1_0_G128 = 242  # 1-bit group-128 (Phase 31)
 
 
 class ExpertGatingFuncType(IntEnum):

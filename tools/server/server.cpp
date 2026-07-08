@@ -17,6 +17,10 @@
 #include <signal.h>
 #include <thread> // for std::thread::hardware_concurrency
 
+#if defined(LLAMA_USE_SCHEDULER)
+#include "llama-scheduler.h"
+#endif
+
 #if defined(_WIN32)
 #include <windows.h>
 #endif
@@ -380,6 +384,13 @@ int llama_server(int argc, char ** argv) {
 
         // this call blocks the main thread until queue_tasks.terminate() is called
         ctx_server.start_loop();
+// TODO(phase-23/24): Jump-forward integration point
+// When grammar_backend == GRAMMAR_BACKEND_JUMP_FWD:
+//   1. After sampling token, call fsm_find_jump(fsm, current_state)
+//   2. If jump found: collect forced_tokens, submit as batch prefill
+//   3. Re-enter scheduler with jumped-forward position
+//   4. Radix cache (Phase 22) provides instant KV reuse for jumped prefix
+// Requires: Phase 24 continuous batching scheduler for re-enqueue
 
         clean_up();
         if (ctx_http.thread.joinable()) {

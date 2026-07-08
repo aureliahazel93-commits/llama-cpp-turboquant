@@ -386,7 +386,9 @@ extern "C" {
     struct ggml_context;
     struct ggml_cgraph;
 
-    // NOTE: always add types at the end of the enum to keep backward compatibility
+    // NOTE: always add types at the END of the enum to keep backward compatibility.
+    // MAX TYPE ID IS 255. Never exceed 255 — new types must use the next lowest free value.
+    // New quant types below 255: scan from the highest existing value downward to find gaps.
     enum ggml_type {
         GGML_TYPE_F32     = 0,
         GGML_TYPE_F16     = 1,
@@ -430,20 +432,24 @@ extern "C" {
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
-        GGML_TYPE_TURBO2_0 = 42, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant
-        GGML_TYPE_TURBO3_0 = 43, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant
-        GGML_TYPE_TURBO4_0 = 44, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant
-        GGML_TYPE_TQ3_1S  = 45, // TurboQuant 3-bit weight: WHT-rotated 8-level Lloyd-Max, block_size=32
-        GGML_TYPE_TQ4_1S  = 46, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
-        GGML_TYPE_PLANAR3_0 = 47, // PlanarQuant 3-bit KV cache: 2D Givens rotation + 2-bit scalar + 1-bit QJL
-        GGML_TYPE_ISO3_0    = 48, // IsoQuant 3-bit KV cache: quaternion 4D rotation + 2-bit scalar + 1-bit QJL
-        GGML_TYPE_PLANAR4_0 = 49, // PlanarQuant 4-bit KV cache: 2D Givens rotation + 3-bit scalar + 1-bit QJL
-        GGML_TYPE_ISO4_0    = 50, // IsoQuant 4-bit KV cache: quaternion 4D rotation + 3-bit scalar + 1-bit QJL
-        GGML_TYPE_STQ1_0   = 51, // AngelSlim STQ: 1.31 bpw structured ternary, 32-entry codebook
-        GGML_TYPE_TEQUILA   = 52, // AngelSlim Tequila: 2.0 bpw deadzone-aware ternary, imatrix-weighted
-        GGML_TYPE_F8_E4M3   = 53, // LeptoQuant FP8 E4M3: 8.06 bpw, KL-calibrated per-block scale
-        GGML_TYPE_COUNT     = 54,
+        GGML_TYPE_TURBO2_0 = 244, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant
+        GGML_TYPE_TURBO3_0 = 245, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant
+        GGML_TYPE_TURBO4_0 = 246, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant
+        GGML_TYPE_TQ3_1S  = 247, // TurboQuant 3-bit weight: WHT-rotated 8-level Lloyd-Max, block_size=32
+        GGML_TYPE_TQ4_1S  = 248, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
+        GGML_TYPE_NAUTILUS3_0   = 243, // NautilusQuant 3-bit KV cache: golden-ratio Givens + 3-bit PolarQuant
+        GGML_TYPE_PLANAR3_0     = 249, // PlanarQuant 3-bit KV cache: 2D Givens rotation + 2-bit scalar + 1-bit QJL
+        GGML_TYPE_ISO3_0    = 250, // IsoQuant 3-bit KV cache: quaternion 4D rotation + 2-bit scalar + 1-bit QJL
+        GGML_TYPE_PLANAR4_0 = 251, // PlanarQuant 4-bit KV cache: 2D Givens rotation + 3-bit scalar + 1-bit QJL
+        GGML_TYPE_ISO4_0    = 252, // IsoQuant 4-bit KV cache: quaternion 4D rotation + 3-bit scalar + 1-bit QJL
+        GGML_TYPE_STQ1_0   = 253, // AngelSlim STQ: 1.31 bpw structured ternary, 32-entry codebook
+        GGML_TYPE_TEQUILA   = 254, // AngelSlim Tequila: 2.0 bpw deadzone-aware ternary, imatrix-weighted
+        GGML_TYPE_F8_E4M3       = 255, // LeptoQuant FP8 E4M3: 8.06 bpw, KL-calibrated per-block scale
+        GGML_TYPE_COUNT         = 256,
     };
+#define GGML_TYPE_FORK_BASE  244
+#define GGML_TYPE_FORK_MAX   255
+#define GGML_IS_FORK_TYPE(t) ((t) >= GGML_TYPE_FORK_BASE && (t) <= GGML_TYPE_FORK_MAX)
 
     // precision
     enum ggml_prec {
@@ -570,6 +576,7 @@ extern "C" {
 
         GGML_OP_FLASH_ATTN_EXT,
         GGML_OP_FLASH_ATTN_BACK,
+        GGML_OP_ATTN_PAGED,
         GGML_OP_SSM_CONV,
         GGML_OP_SSM_SCAN,
         GGML_OP_WIN_PART,

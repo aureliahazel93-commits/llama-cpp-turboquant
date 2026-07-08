@@ -15,6 +15,7 @@
 #include "ops.h"
 #include "ggml.h"
 #include "common.h"
+#include "ggml-ops-fork-dispatch.h"
 
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
@@ -1747,7 +1748,7 @@ static void ggml_compute_forward_mul_mat_id(
 
 /////////////////////////////////
 
-static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
+void ggml_compute_forward_upstream(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
     GGML_ASSERT(params);
 
     if (tensor->op == GGML_OP_NONE || ggml_is_empty(tensor)) {
@@ -2046,6 +2047,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                 GGML_ASSERT(t == 0 || t == 1);
                 bool masked = t != 0;
                 ggml_compute_forward_flash_attn_back(params, masked, tensor);
+            } break;
+        case GGML_OP_ATTN_PAGED:
+            {
+                ggml_compute_forward_attn_paged(params, tensor);
             } break;
         case GGML_OP_SSM_CONV:
             {
@@ -3118,7 +3123,10 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
         if (n_fused > 0) {
             node_n += n_fused;
         } else {
-            ggml_compute_forward(&params, node);
+            // HOOK: fork dispatch gate — see ggml-ops-fork-dispatch.h
+            if (!ggml_fork_compute_forward(&params, node)) {
+                ggml_compute_forward_upstream(&params, node);
+            }
         }
 
         if (state->ith == 0 && cplan->abort_callback &&

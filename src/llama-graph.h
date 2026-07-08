@@ -1145,3 +1145,9 @@ struct llm_graph_context {
 
 // TODO: better name
 int32_t llama_relative_position_bucket(llama_pos x, llama_pos y, uint64_t n_buckets, bool bidirectional);
+
+struct ggml_tensor * llama_graph_insert_all_gather(
+        struct ggml_context * ctx,
+        struct ggml_cgraph * graph,
+        struct ggml_tensor * attn_output,
+        int32_t n_ranks);

@@ -109,6 +109,15 @@ public:
     // sequence-set-wise split - each ubatch contains a single sequence-set
     llama_ubatch split_seq(uint32_t n_ubatch);
 
+    llama_ubatch split_mixed(
+            const std::vector<llama_token> & prefill_tokens,
+            llama_seq_id                  prefill_seq_id,
+            llama_pos                     prefill_pos_start,
+            const std::vector<llama_seq_id> & decode_seq_ids,
+            const std::vector<llama_pos>   & decode_positions,
+            const std::vector<llama_token> & decode_tokens,
+            uint32_t                       n_ubatch);
+
     // a helper method for creating a well-defined ubatch of tokens
     // TODO: support embeddings if needed in the future
     llama_ubatch ubatch_reserve(uint32_t n_seq_tokens, uint32_t n_seqs);

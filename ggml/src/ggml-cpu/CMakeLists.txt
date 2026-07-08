@@ -52,10 +52,12 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         ggml-cpu/vec.cpp
         ggml-cpu/ops.h
         ggml-cpu/ops.cpp
+        ggml-cpu/attention-paged.cpp
+        ggml-cpu/attention-tree.cpp
         )
 
     target_compile_features(${GGML_CPU_NAME} PRIVATE c_std_11 cxx_std_17)
-    target_include_directories(${GGML_CPU_NAME} PRIVATE . ggml-cpu)
+    target_include_directories(${GGML_CPU_NAME} PRIVATE . ggml-cpu ../include)
 
     if (APPLE AND GGML_ACCELERATE)
         find_library(ACCELERATE_FRAMEWORK Accelerate)
@@ -707,10 +709,22 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         list(APPEND GGML_CPU_SOURCES ${GGML_KLEIDIAI_SOURCES})
     endif()
 
+    # Fork dispatch extension — see ggml-ops-fork-dispatch.h
+    # New files are in ggml/src/ (sibling of this CMakeLists.txt's dir)
+    list(APPEND GGML_CPU_SOURCES
+        ggml-ops-fork-dispatch.cpp
+        ggml-ops-fork-kernels.cpp
+        ggml-ops-fork-validate.cpp
+        ggml-backend-loader.cpp
+    )
+
     message(STATUS "Adding CPU backend variant ${GGML_CPU_NAME}: ${ARCH_FLAGS} ${ARCH_DEFINITIONS}")
     target_sources(${GGML_CPU_NAME} PRIVATE ${GGML_CPU_SOURCES})
     target_compile_options(${GGML_CPU_NAME} PRIVATE ${ARCH_FLAGS})
     target_compile_definitions(${GGML_CPU_NAME} PRIVATE ${ARCH_DEFINITIONS})
+    target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_FORK_DISPATCH=1)
+
+
 
     if (EMSCRIPTEN)
         set_target_properties(${GGML_CPU_NAME} PROPERTIES COMPILE_FLAGS "-msimd128")

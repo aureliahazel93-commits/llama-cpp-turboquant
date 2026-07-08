@@ -47,6 +47,7 @@ void main() {
     const uint K_SCALE_SIZE = 12;
 
     float total_sum = 0.0;
+    const uint a_max = pc.N * pc.K > 0 ? pc.N * pc.K - 1 : 0;
 
     for (uint sb = 0; sb < nb; sb++) {
         // Super-block base offset
@@ -81,7 +82,7 @@ void main() {
             // This shader is most effective for Q4_0 and Q8_0 where the
             // block structure maps cleanly to subgroup operations.
 
-            float x = activations[col * K + weight_idx];
+            float x = activations[min(col * K + weight_idx, a_max)];
             // Weight dequant would go here — using scale lookup
             // float w = d * scales[sub_block] * (qs[weight_idx] - 8) - dmin * qmins[sub_block];
             // partial += w * x;
@@ -92,6 +93,6 @@ void main() {
     }
 
     if (lane == 0) {
-        output[row * pc.N + col] = total_sum;
+        output[min(row * pc.N + col, pc.M * pc.N > 0 ? pc.M * pc.N - 1 : 0)] = total_sum;
     }
 }

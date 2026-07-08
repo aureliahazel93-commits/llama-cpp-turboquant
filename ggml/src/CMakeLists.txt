@@ -211,11 +211,14 @@ add_library(ggml-base
             ggml-planar4-quant.c
             ggml-iso-quant.c
             ggml-iso4-quant.c
+            ggml-nautilus-quant.c
             ggml-tequila-quant.c
             ggml-stq1_0-quant.c
             ggml-f8-e4m3-quant.c
+            ggml-q1-0-g128-quant.c
             ggml-backend-quant.c
             ggml-quant-caps.c
+            ggml-fork-types.c
             gguf.cpp)
 
 set_target_properties(ggml-base PROPERTIES

@@ -37,6 +37,10 @@ static double compute_ppl(llama_context * ctx, const common_params & params) {
 
     std::vector<llama_token> tokens(prompt.size() + 1);
     int n_tokens = llama_tokenize(vocab, prompt.c_str(), (int)prompt.size(), tokens.data(), tokens.size(), true, true);
+    if (n_tokens < 0) {
+        LOG_ERR("stability-runner: tokenize failed (returned %d)\n", n_tokens);
+        return -1.0;
+    }
     tokens.resize(n_tokens);
     if (tokens.empty()) {
         LOG_ERR("stability-runner: failed to tokenize prompt\n");
@@ -140,5 +144,16 @@ int main(int argc, char ** argv) {
     }
 
     llama_backend_free();
+    return 0;
+}
+
+int run_rotorquant_benchmark(const std::string & model_path,
+                              int32_t n_prompt, int32_t n_predict) {
+    (void)model_path; (void)n_prompt; (void)n_predict;
+    printf("RotorQuant benchmark: not yet implemented\n");
+    printf("  Planned measurements:\n");
+    printf("    - FMA count per block: turbo=16384, planar=256, iso=512\n");
+    printf("    - Decode speed: planar >= 1.20x turbo, iso >= 1.20x turbo\n");
+    printf("    - Quality: planar PPL within 5%% of turbo PPL at same bpw\n");
     return 0;
 }

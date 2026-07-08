@@ -40,18 +40,20 @@ void main() {
     const uint nb = K / 32;  // Q8_0 blocks per row
 
     float total_sum = 0.0;
+    const uint w_max = pc.M * pc.w_stride > 0 ? pc.M * pc.w_stride - 1 : 0;
+    const uint a_max = pc.N * pc.K > 0 ? pc.N * pc.K - 1 : 0;
 
     for (uint b = 0; b < nb; b++) {
         // Q8_0 block: 2 bytes (fp16 d) + 32 bytes (int8 qs)
         uint block_offset = row * pc.w_stride + b * 34;
 
         // Load and broadcast scale via subgroup shuffle
-        uint d_bits = uint(weights[block_offset]) | (uint(weights[block_offset + 1]) << 8);
+        uint d_bits = uint(weights[min(block_offset, w_max)]) | (uint(weights[min(block_offset + 1, w_max)]) << 8);
         float d = unpackHalf2x16(d_bits).x;
         d = subgroupShuffle(d, 0);
 
         // Each lane loads one int8 weight from qs[lane]
-        int q = int(weights[block_offset + 2 + lane]) - 128;  // signed interpretation
+        int q = int(weights[min(block_offset + 2 + lane, w_max)]) - 128;
         // Note: Q8_0 stores as uint8_t but interprets as int8_t.
         // In GLSL, uint8_t loads as 0..255. Convert to signed: q - 256 if q > 127.
         if (q > 127) q -= 256;
@@ -59,7 +61,7 @@ void main() {
         // The dequant is: w = d * float(int8_t(qs[i]))
         // Since we loaded as uint8, convert:
         uint qs_offset = block_offset + 2 + lane;
-        uint qs_word = weights[qs_offset / 4];
+        uint qs_word = weights[min(qs_offset / 4, w_max)];
         uint qs_bp = qs_offset % 4;
         uint qs_raw = (qs_word >> (qs_bp * 8)) & 0xFF;
         int qs_val = int(qs_raw);
@@ -67,7 +69,7 @@ void main() {
         float w = d * float(qs_val);
 
         // Load activation for this lane's k position
-        float x = activations[col * K + b * 32 + lane];
+        float x = activations[min(col * K + b * 32 + lane, a_max)];
 
         // Per-lane product and subgroup reduction
         float partial = w * x;
@@ -77,6 +79,6 @@ void main() {
     }
 
     if (lane == 0) {
-        output[row * pc.N + col] = total_sum;
+        output[min(row * pc.N + col, pc.M * pc.N > 0 ? pc.M * pc.N - 1 : 0)] = total_sum;
     }
 }
