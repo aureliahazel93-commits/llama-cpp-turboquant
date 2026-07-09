@@ -4,7 +4,7 @@
 #include "ggml.h"
 #include "ggml-common.h"
 
-#define GGML_TYPE_FORK_BASE  244
+#define GGML_TYPE_FORK_BASE  240
 #define GGML_TYPE_FORK_MAX   255
 #define GGML_IS_FORK_TYPE(t) ((t) >= GGML_TYPE_FORK_BASE && (t) <= GGML_TYPE_FORK_MAX)
 

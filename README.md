@@ -3,10 +3,10 @@
 > Production-grade KV-cache and weight quantization for llama.cpp, with cross-backend kernel support for Apple Silicon, NVIDIA CUDA, AMD ROCm, and Vulkan.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Status: WIP](https://img.shields.io/badge/status-work--in--progress-yellow.svg)](https://github.com/TheTom/llama-cpp-turboquant)
+[![Status: Active](https://img.shields.io/badge/status-active-green.svg)](https://github.com/TheTom/llama-cpp-turboquant)
 [![Codec papers](https://img.shields.io/badge/codec-turboquant__plus-orange.svg)](https://github.com/TheTom/turboquant_plus)
 
-A fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) integrating the **TurboQuant+** codec stack — Walsh-Hadamard rotated polar quantization, attention-gated sparse dequantization, and layer-aware V compression policies. The codec design, calibration, and validation papers live at [TheTom/turboquant_plus](https://github.com/TheTom/turboquant_plus); this repository is the llama.cpp runtime integration.
+A fork of [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) integrating the **TurboQuant+** codec stack — Walsh-Hadamard rotated polar quantization, attention-gated sparse dequantization, and layer-aware V compression policies — plus a native C++ serving stack (paged KV cache, radix prefix cache, continuous batching, chunked prefill, speculative decoding, runtime backend plugins). The codec design, calibration, and validation papers live at [TheTom/turboquant_plus](https://github.com/TheTom/turboquant_plus); this repository is the llama.cpp runtime integration.
 
 ### Lineage — why the `+`
 
@@ -35,6 +35,15 @@ This fork's TurboQuant integration is used in:
 ---
 
 ## What this fork adds
+
+| Category | Features |
+|---|---|
+| **Quant types** | TurboQuant (turbo2/3/4, TQ3_1S, TQ4_1S), PlanarQuant (planar3/4_0), IsoQuant (iso3/4_0), STQ1_0, TEQUILA, F8_E4M3, Q1_0_G128 |
+| **Serving** | Paged KV cache, RadixAttention prefix cache, continuous batching, chunked prefill, overlap scheduler, cache-aware router |
+| **Speculative decoding** | Tree-attention (EAGLE3), PHANTOM zero-copy n-gram, SAGUARO LRU cache, three-tier fallback chain |
+| **GPU backends** | Runtime-loadable plugins (CPU/CUDA/Vulkan/Metal/Hybrid/HIP), hybrid CPU+iGPU with thermal balancing, Vulkan lane safety |
+| **Tooling** | Smart quant recommender, .modelfile manifest, model distribution (llama-mod), RotorQuant benchmarks, stability runner |
+| **Architecture** | Quant caps system, fork dispatch (zero ops.cpp edits), fork type registry (IDs 244-255) |
 
 ### Quantization types
 
@@ -198,6 +207,239 @@ The following activate based on the selected types — no flags required:
 - **Flash Attention** — auto-enabled for turbo KV with the relevant backend kernel.
 
 See the linked papers above for parameter selection guidance on a per-model basis.
+
+---
+
+## Serving & Inference Features
+
+Beyond quantization, this fork adds a full serving stack inspired by vLLM and SGLang, implemented natively in C++.
+
+### Paged KV cache (Phase 21)
+
+Divides the KV cache into fixed-size blocks (default 16 tokens) backed by a physical block pool, eliminating the 60-80% memory waste from contiguous per-sequence allocation. Each sequence holds a block table mapping logical positions to physical block IDs. Supports copy-on-write for prefix sharing.
+
+```bash
+# enable paged KV cache
+llama-server -m model.gguf --kv-cache paged --block-size 16
+```
+
+Files: `src/llama-kv-cache-paged.h`, `src/llama-kv-cache-paged.cpp`, `ggml/src/ggml-cpu/attention-paged.cpp`
+
+### RadixAttention prefix cache (Phase 22)
+
+Maintains a radix tree on the CPU mapping token-sequence prefixes to KV block IDs. When multiple requests share a system prompt or conversation prefix, the KV blocks are reused without recomputation. Blog reports up to 5x throughput for shared prefixes.
+
+Files: `src/llama-prefix-cache.h`, `src/llama-prefix-cache.cpp`
+
+### Jump-forward decoding (Phase 23)
+
+Analyzes grammar FSMs (JSON schema, regex, EBNF) for non-branching paths where the next N tokens are forced by the grammar. Batch-prefills the forced tokens in one step instead of decoding each individually. Up to 2x lower latency for structured output.
+
+Files: `src/llama-grammar-fsm.h`, `src/llama-grammar-jump.cpp`, `src/llama-grammar-xgrammar.cpp`
+
+### Continuous batching scheduler (Phase 24)
+
+Iteration-level batch scheduling with preemption. Every decode iteration: admit waiting requests, evict finished ones, preempt low-priority sequences when memory is full. Paged KV makes preemption cheap (reclaim blocks, re-admit from prefix cache).
+
+Files: `src/llama-scheduler.h`, `src/llama-scheduler.cpp`
+
+### Chunked prefill (Phase 25)
+
+Splits long prompts into chunks (default `max_num_batched_tokens=512`), mixed in the same batch as decode steps from running sequences. Eliminates TTFT spikes — short prompts no longer wait behind a 32k-token prefill.
+
+Integrated into the continuous batching scheduler via `split_mixed()` in `llama-batch.cpp`.
+
+### Overlap scheduler (Phase 26)
+
+Double-buffered planning: while the GPU executes batch N, a dedicated CPU thread prepares batch N+1. Zero GPU idle time between decode iterations. ~1.3x throughput improvement.
+
+Files: `src/llama-scheduler-overlap.cpp`
+
+### Speculative decoding
+
+| Method | Source | Mechanism |
+|---|---|---|
+| **Tree-attention** (Phase 27) | vLLM EAGLE / SGLang EAGLE3 | Drafter proposes a tree of K tokens; target verifies all in one attention pass with a tree-structured causal mask. 1.4-1.9x throughput. |
+| **PHANTOM** (Phase 30) | sglang-1-bit-turbo | Background CPU thread pre-computes n-gram draft tokens via zero-copy pinned memory. GPU never waits for draft generation. 2.5x better than naive n-gram. |
+| **SAGUARO** (Phase 33) | sglang-1-bit-turbo | LRU cache wrapping any speculative algorithm — repeated prompt subsequences return cached drafts in O(1). |
+| **Fallback chain** (Phase 34) | sglang-1-bit-turbo | Three-tier auto-selection: native C++ kernel > Vulkan compute shader > scalar fallback. |
+
+Files: `src/llama-speculative-tree.*`, `src/llama-speculative-phantom.*`, `src/llama-speculative-saguaro.*`, `src/llama-speculative-sampling.*`, `src/llama-ngram-corpus.*`, `src/llama-bloom-filter.h`, `src/llama-phantom-buffer.h`, `src/llama-phantom-scaler.cpp`
+
+### DP-attention KV sharding (Phase 28)
+
+For MLA (Multi-head Latent Attention) models like DeepSeek V3/R1: shards the single KV head across data-parallel workers instead of duplicating it. All-gathers partial attention results before the MoE layer. 1.9x decode throughput for MLA models on multi-GPU.
+
+Integrated into `llama-kv-cache-paged.cpp` (sharded block allocation) and `llama-graph.cpp` (`llama_graph_insert_all_gather`).
+
+### Cache-aware router (Phase 29)
+
+For multi-worker serving: the router maintains shadow copies of each worker's radix prefix tree. Routes requests to the worker with the longest predicted prefix match. 3.8x hit rate improvement over round-robin.
+
+Files: `tools/server/router-cache-aware.cpp`, `tools/server/router-shadow-tree.h`
+
+### Hybrid CPU+iGPU backend (Phases 13-16)
+
+Splits inference compute between CPU cores and integrated GPU (Vulkan). Thermal-balanced via PID controller that adjusts the CPU/iGPU ratio dynamically. Uses UMA (Unified Memory Architecture) zero-copy buffers.
+
+Key files: `ggml/src/ggml-hybrid/` (compute, scheduler, shaders, uma subdirectories)
+
+### Vulkan lane safety (Phase 32)
+
+AMD RDNA2 GPUs validate virtual addresses on ALL wavefront lanes, including exec-masked (inactive) ones. NVIDIA silently ignores OOB reads on inactive lanes. All Vulkan compute shaders use bounds clamping before pointer arithmetic — zero cost on NVIDIA, crash-prevention on AMD.
+
+Applied to: `ggml/src/ggml-hybrid/shaders/gemm_q4_0.comp`, `gemm_q8_0.comp`, `gemm_q4_k.comp`
+
+---
+
+## Runtime Backend Plugins (Phase 36)
+
+Each compute backend (CPU, CUDA, Vulkan, Metal, Hybrid, HIP) can be compiled as a runtime-loadable shared library. One binary runs on any hardware — the loader discovers and loads the appropriate backend plugin at startup.
+
+### Plugin architecture
+
+```
+ggml/backends/
+    libggml-cpu.so          ← always available (fallback)
+    libggml-cuda.so         ← loaded if NVIDIA GPU detected
+    libggml-vulkan.so       ← loaded if Vulkan available (cross-vendor)
+    libggml-metal.dylib     ← loaded on Apple Silicon
+    libggml-hybrid.so       ← loaded if iGPU + UMA detected
+    libggml-hip.so          ← loaded if AMD ROCm detected
+```
+
+The loader (`ggml-backend-loader.cpp`) scans the backend directory (default: `/usr/local/lib/ggml-backends`, overridable via `GGML_BACKENDS_PATH`), `dlopen`s each `.so`/`.dylib`, and calls `ggml_backend_plugin_init()` to populate a plugin info struct:
+
+- Backend name, device count, VRAM per device
+- Supported quant type IDs (fork + upstream types with native kernels)
+- Compute score (relative speed), UMA flag
+- `create_backend(device_idx)` and `register_quant_ops(device_idx)` function pointers
+
+The scheduler then selects the best backend per tensor based on device memory, quant support, and compute speed. If no plugin supports a fork type, the CPU fallback handles it via `type_traits->to_float`.
+
+> **Note:** If the backend directory doesn't exist (e.g., CPU-only deployment), the loader returns 0 plugins and the statically-linked CPU backend handles everything. Plugins are purely optional.
+
+### Build with plugin support
+
+```bash
+cmake -B build -DGGML_BACKEND_PLUGINS=ON -DGGML_CUDA=ON -DGGML_VULKAN=ON
+cmake --build build -j
+# Plugins installed to: build/bin/ggml-backends/
+# Copy to: /usr/local/lib/ggml-backends/ or set GGML_BACKENDS_PATH
+```
+
+Files: `ggml/include/ggml-backend-plugin.h`, `ggml/src/ggml-backend-loader.cpp`
+
+---
+
+## Additional Quant Types (Phases 31, 35)
+
+| Type | bpw | Source | Notes |
+|---|---|---|---|
+| `Q1_0_G128` | 1.125 | sglang-1-bit-turbo (PrismML Bonsai) | Pure binary: 1 bit per weight + fp16 scale per 128 weights. 4B model in 572MB. |
+| `STQ1_0` | 1.31 | AngelSlim | Structured ternary, 32-entry codebook |
+| `TEQUILA` | 2.0 | AngelSlim | Deadzone-aware ternary, imatrix-weighted |
+| `F8_E4M3` | 8.06 | LeptoQuant | FP8 E4M3, KL-calibrated per-block scale |
+| `PLANAR3_0` / `PLANAR4_0` | 3-4 | RotorQuant | 2D Givens rotation + scalar + QJL. 64x fewer FMAs than TurboQuant. |
+| `ISO3_0` / `ISO4_0` | 3-4 | RotorQuant | Quaternion 4D rotation + scalar + QJL. 32x fewer FMAs. |
+
+The RotorQuant benchmark suite (Phase 35) validates FMA counts and speed claims across backends:
+
+```bash
+# run quant benchmark comparison
+llama-stability --benchmark rotorquant --model model.gguf
+```
+
+Files: `ggml/src/ggml-q1-0-g128-quant.c`, `tools/stability/stability_runner.cpp`
+
+---
+
+## Quant Caps System (Phase 2)
+
+Each quant type carries semantic capability flags in a caps table (`ggml-quant-caps.c`) that higher-level code queries instead of hardcoding type checks:
+
+| Flag | Meaning |
+|---|---|
+| `needs_wht` | Requires Walsh-Hadamard rotation before quantization |
+| `needs_deferred` | Deferred allocation — blocks allocated on first write, not on cache init |
+| `head_align` | Required head alignment (e.g., 128 for some planar types) |
+| `k_capable` / `v_capable` | Can be used for K or V cache |
+| `weight_capable` | Can be used for weight quantization |
+
+This makes adding a new quant type a data-only change — no edits to `kv-cache.cpp`, `graph.cpp`, or `ops.cpp`.
+
+## Fork Dispatch Architecture
+
+Fork types (IDs 244-255) are dispatched through a three-tier system that avoids modifying upstream's `ops.cpp`:
+
+1. **Tier 1** — Fork-specific ops (DEQUANT_FORK, QUANT_FORK, MUL_MAT_FORK, WEIGHT_TRANSFORM) via `ggml-ops-fork.def`
+2. **Tier 2** — Upstream ops with fork-typed sources, dispatched to specialized handlers via `ggml-ops-fork-types.def`
+3. **Tier 3** — Fallback: dequant to F32, compute upstream, requant if needed
+
+The dispatch gate lives at `ggml-cpu.c:3122` — a single branch check before the upstream switch statement.
+
+Files: `ggml/src/ggml-ops-fork-dispatch.{h,cpp}`, `ggml/src/ggml-ops-fork-kernels.cpp`, `ggml/src/ggml-ops-fork.def`, `ggml/src/ggml-ops-fork-types.def`
+
+---
+
+## Smart Quant Recommender (Phase 37)
+
+Automatically selects optimal weight + KV quant types for the detected hardware:
+
+```bash
+# detect hardware and recommend quants for a model
+llama-recommender --model model.gguf
+```
+
+Takes prober output (GPU vendor, VRAM, CPU features, UMA), model metadata (params, layers, context), caps table, and loaded backend plugins as inputs. Outputs weight type, KV K/V types, recommended backend, estimated VRAM, speed, and quality.
+
+Files: `tools/recommender/quant-recommender.{cpp,h}`, `tools/recommender/quant-recommender-cli.cpp`
+
+## Model Manifest Format (Phase 38)
+
+A `.modelfile` captures complete inference configuration in portable TOML-like text:
+
+```ini
+[model]
+name = "gemma4-12b-turbo-planar"
+base = "models/gemma-4-12b.gguf"
+
+[quantization]
+weight_type = "Q4_K"
+cache_type_k = "F_PLANAR3_0"
+cache_type_v = "F_TURBO4_0"
+
+[speculative]
+algorithm = "PHANTOM"
+num_draft_tokens = 4
+```
+
+```bash
+llama-cli --modelfile gemma4.modelfile
+```
+
+Files: `common/modelfile.{h,cpp}`
+
+## Model Distribution (Phase 39)
+
+One-command model acquisition from HuggingFace Hub:
+
+```bash
+# download a pre-quantized model
+llama-mod pull gemma4-12b-q4k-planar3-turbo4
+
+# run it (auto-detects hardware, applies cached config)
+llama-mod run gemma4-12b-q4k-planar3-turbo4
+
+# list locally cached models
+llama-mod list
+```
+
+Models are cached in `~/.llama-mod/models/` with SHA256 verification. The manifest tracks name, local path, size, and download timestamp.
+
+Files: `tools/modhub/llama-mod.cpp`, `tools/modhub/registry.{h,cpp}`
+
+---
 
 ## Citation
 

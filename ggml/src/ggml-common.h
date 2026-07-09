@@ -383,6 +383,16 @@ typedef struct {
     uint8_t   qs[QK_TQ4_1S / 2];      // 16 bytes: 4-bit indices nibble-packed
 } block_tq4_1s;                         // 20 bytes total
 static_assert(sizeof(block_tq4_1s) == 20, "wrong tq4_1s block size");
+
+// Edge formats: block_size=32, per-half RMS scaling, uniform 4-bit nibble-packed
+// Used by both iso-edge (quaternion) and planar-edge (Givens) variants
+#define QK_EDGE 32
+typedef struct {
+    ggml_half d0;                   //  2 bytes: RMS scale for elements [0..15]
+    ggml_half d1;                   //  2 bytes: RMS scale for elements [16..31]
+    uint8_t   qs[QK_EDGE / 2];      // 16 bytes: 4-bit uniform indices nibble-packed
+} block_edge_4bit;                   // 20 bytes total = 5.0 bits/value
+static_assert(sizeof(block_edge_4bit) == 20, "wrong edge block size");
 // NautilusQuant 3-bit: golden-ratio Givens rotation + 3-bit PolarQuant
 // Same block layout as turbo3_0 (norm + 2-bit indices + 1-bit signs = 14 bytes per 128 values)
 // Rotation: 3-layer Givens with golden-angle theta_k = (2*pi/phi^2)*(k+1)

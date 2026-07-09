@@ -1,5 +1,6 @@
 #include "ggml-vulkan.h"
 #include <vulkan/vulkan_core.h>
+#include "ggml-backend-quant.h"
 #if defined(GGML_VULKAN_RUN_TESTS) || defined(GGML_VULKAN_CHECK_RESULTS)
 #include <chrono>
 #include "ggml-cpu.h"
@@ -17457,11 +17458,13 @@ static ggml_backend_dev_t ggml_backend_vk_reg_get_device(ggml_backend_reg_t reg,
                 ctx->is_integrated_gpu = ggml_backend_vk_get_device_type(i) == vk::PhysicalDeviceType::eIntegratedGpu;
                 ctx->pci_bus_id = ggml_backend_vk_get_device_pci_id(i);
                 ctx->op_offload_min_batch_size = min_batch_size;
-                devices.push_back(new ggml_backend_device {
+                ggml_backend_dev_t dev = new ggml_backend_device {
                     /* .iface   = */ ggml_backend_vk_device_i,
                     /* .reg     = */ reg,
                     /* .context = */ ctx,
-                });
+                };
+                ggml_backend_register_standard_quants(dev, false);
+                devices.push_back(dev);
             }
             initialized = true;
         }

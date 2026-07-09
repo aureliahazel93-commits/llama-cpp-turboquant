@@ -118,6 +118,8 @@ add_library(${TARGET}
     jinja/string.h
     jinja/caps.cpp
     jinja/caps.h
+    modelfile.cpp
+    modelfile.h
     )
 
 set_target_properties(${TARGET} PROPERTIES

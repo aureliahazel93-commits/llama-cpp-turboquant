@@ -166,6 +166,17 @@ GGML_API size_t quantize_tequila(const float * GGML_RESTRICT src, void * GGML_RE
 GGML_API void quantize_row_f8_e4m3_ref(const float * GGML_RESTRICT x, block_f8_e4m3 * GGML_RESTRICT y, int64_t k);
 GGML_API void dequantize_row_f8_e4m3(const block_f8_e4m3 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API size_t quantize_f8_e4m3(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+
+// Edge formats: block_size=32, uniform 4-bit, rotated-domain attention
+GGML_API void quantize_row_planar_edge_ref(const float * GGML_RESTRICT x, block_edge_4bit * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_planar_edge(const block_edge_4bit * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void ggml_vec_dot_planar_edge_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+GGML_API size_t quantize_planar_edge(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+
+GGML_API void quantize_row_iso_edge_ref(const float * GGML_RESTRICT x, block_edge_4bit * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_iso_edge(const block_edge_4bit * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API void ggml_vec_dot_iso_edge_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+GGML_API size_t quantize_iso_edge(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
 #ifdef GGML_USE_Q1_0_G128
 GGML_API void dequantize_row_q1_0_g128(const block_q1_0_g128 * GGML_RESTRICT, float * GGML_RESTRICT, int64_t);
 GGML_API void quantize_row_q1_0_g128_ref(const float * GGML_RESTRICT, block_q1_0_g128 * GGML_RESTRICT, int64_t);

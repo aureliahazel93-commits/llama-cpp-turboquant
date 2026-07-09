@@ -71,6 +71,16 @@ static const struct ggml_quant_caps quant_caps_table[GGML_TYPE_COUNT] = {
         .weight_capable  = true,
         .cpu_fallback_ok = true,
     },
+    [GGML_TYPE_PLANAR_EDGE] = {
+        .k_cache_capable  = true,
+        .v_cache_capable  = true,
+        .cpu_fallback_ok  = true,
+    },
+    [GGML_TYPE_ISO_EDGE] = {
+        .k_cache_capable  = true,
+        .v_cache_capable  = true,
+        .cpu_fallback_ok  = true,
+    },
     [GGML_TYPE_STQ1_0] = {
         .weight_capable  = true,
         .cpu_fallback_ok = true,

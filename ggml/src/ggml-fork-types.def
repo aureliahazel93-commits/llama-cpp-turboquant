@@ -1,5 +1,8 @@
 // X-macro: fork quant type definitions
 // GGML_FORK_QUANT_TYPE(enum_suffix, id, block_struct, qk_value, type_name, fn_suffix)
+GGML_FORK_QUANT_TYPE(PLANAR_EDGE, 240, block_edge_4bit, 32, "planar_edge", planar_edge)
+GGML_FORK_QUANT_TYPE(ISO_EDGE,    241, block_edge_4bit, 32, "iso_edge",    iso_edge)
+GGML_FORK_QUANT_TYPE(NAUTILUS3_0, 243, block_nautilus3_0, 128, "nautilus3",  nautilus3_0)
 GGML_FORK_QUANT_TYPE(TURBO2_0,  244, block_turbo2_0,  128, "turbo2",   turbo2_0)
 GGML_FORK_QUANT_TYPE(TURBO3_0,  245, block_turbo3_0,  128, "turbo3",   turbo3_0)
 GGML_FORK_QUANT_TYPE(TURBO4_0,  246, block_turbo4_0,  128, "turbo4",   turbo4_0)

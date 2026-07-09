@@ -214,6 +214,7 @@ add_library(ggml-base
             ggml-nautilus-quant.c
             ggml-tequila-quant.c
             ggml-stq1_0-quant.c
+            ggml-edge-quant.c
             ggml-f8-e4m3-quant.c
             ggml-q1-0-g128-quant.c
             ggml-backend-quant.c

@@ -442,12 +442,14 @@ extern "C" {
         GGML_TYPE_ISO3_0    = 250, // IsoQuant 3-bit KV cache: quaternion 4D rotation + 2-bit scalar + 1-bit QJL
         GGML_TYPE_PLANAR4_0 = 251, // PlanarQuant 4-bit KV cache: 2D Givens rotation + 3-bit scalar + 1-bit QJL
         GGML_TYPE_ISO4_0    = 252, // IsoQuant 4-bit KV cache: quaternion 4D rotation + 3-bit scalar + 1-bit QJL
+        GGML_TYPE_PLANAR_EDGE  = 240, // PlanarEdge 4-bit KV: Givens rotation + uniform 4-bit, block=32, rotated-domain
+        GGML_TYPE_ISO_EDGE     = 241, // IsoEdge 4-bit KV: quaternion rotation + uniform 4-bit, block=32, rotated-domain
         GGML_TYPE_STQ1_0   = 253, // AngelSlim STQ: 1.31 bpw structured ternary, 32-entry codebook
         GGML_TYPE_TEQUILA   = 254, // AngelSlim Tequila: 2.0 bpw deadzone-aware ternary, imatrix-weighted
         GGML_TYPE_F8_E4M3       = 255, // LeptoQuant FP8 E4M3: 8.06 bpw, KL-calibrated per-block scale
         GGML_TYPE_COUNT         = 256,
     };
-#define GGML_TYPE_FORK_BASE  244
+#define GGML_TYPE_FORK_BASE  240
 #define GGML_TYPE_FORK_MAX   255
 #define GGML_IS_FORK_TYPE(t) ((t) >= GGML_TYPE_FORK_BASE && (t) <= GGML_TYPE_FORK_MAX)
 

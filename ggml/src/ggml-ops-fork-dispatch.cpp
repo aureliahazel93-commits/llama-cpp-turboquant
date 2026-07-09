@@ -1,9 +1,11 @@
 #include "ggml-ops-fork-dispatch.h"
 #include "ggml-fork-types.h"
 #include "ggml-quants.h"
+#include "ggml-cpu.h"
 #include "ops.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 // Handler stubs defined in ggml-ops-fork-kernels.cpp
 extern void compute_forward_dequant_fork(struct ggml_compute_params *, struct ggml_tensor *);
@@ -75,13 +77,49 @@ static void fork_tier3_fallback(
     struct ggml_compute_params * params,
     struct ggml_tensor * tensor) {
 
-    GGML_ASSERT(false &&
-        "fork Tier 3 fallback reached for an op without a registered "
-        "(op, fork_type) handler and without ops.cpp fork-type patches. "
-        "Add a GGML_FORK_TYPE_OP entry in ggml-ops-fork-types.def, "
-        "or patch ops.cpp to add fork types to the op's case list.");
-    (void)params;
-    (void)tensor;
+    struct ggml_tensor * saved_src[GGML_MAX_SRC] = {0};
+    struct ggml_tensor   temp_src[GGML_MAX_SRC];
+    void               * temp_data[GGML_MAX_SRC]  = {0};
+    bool any_swapped = false;
+
+    for (int i = 0; i < GGML_MAX_SRC && tensor->src[i]; i++) {
+        if (!GGML_IS_FORK_TYPE(tensor->src[i]->type)) continue;
+        if (tensor->src[i] == tensor) continue;
+
+        saved_src[i] = tensor->src[i];
+        temp_src[i]  = *saved_src[i];
+        temp_src[i].type = GGML_TYPE_F32;
+
+        int64_t nelements = ggml_nelements(saved_src[i]);
+        temp_data[i] = malloc((size_t)nelements * sizeof(float));
+        if (!temp_data[i]) continue;
+
+        int64_t nrows = ggml_nrows(saved_src[i]);
+        int64_t ncols = saved_src[i]->ne[0];
+
+        ggml_fork_dequant_to_f32(saved_src[i]->type,
+                                  saved_src[i]->data,
+                                  (float *)temp_data[i],
+                                  nrows, ncols);
+
+        temp_src[i].data = temp_data[i];
+        temp_src[i].nb[0] = sizeof(float);
+        temp_src[i].nb[1] = temp_src[i].nb[0] * saved_src[i]->ne[0];
+        temp_src[i].nb[2] = temp_src[i].nb[1] * saved_src[i]->ne[1];
+        temp_src[i].nb[3] = temp_src[i].nb[2] * saved_src[i]->ne[2];
+
+        tensor->src[i] = &temp_src[i];
+        any_swapped = true;
+    }
+
+    ggml_compute_forward_upstream(params, tensor);
+
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        if (saved_src[i]) tensor->src[i] = saved_src[i];
+        if (temp_data[i]) free(temp_data[i]);
+    }
+
+    (void)any_swapped;
 }
 
 // =====================================================================
@@ -161,6 +199,20 @@ bool ggml_fork_compute_forward(
 
     // ---- Tier 2: upstream op with fork-typed source ----
     if (ggml_has_fork_type_internal(tensor)) {
+        // MUL_MAT: upstream has native vec_dot for turbo2/3/4, tq3_1s, tq4_1s
+        // via type_traits_cpu[]. Skip fork dispatch — let upstream handle it directly.
+        if (tensor->op == GGML_OP_MUL_MAT) {
+            for (int i = 0; i < GGML_MAX_SRC && tensor->src[i]; i++) {
+                if (GGML_IS_FORK_TYPE(tensor->src[i]->type)) {
+                    const struct ggml_type_traits_cpu * cpu_traits =
+                        ggml_get_type_traits_cpu(tensor->src[i]->type);
+                    if (cpu_traits && cpu_traits->vec_dot) {
+                        return false;
+                    }
+                }
+            }
+        }
+
         if (ggml_try_fork_type_handler(params, tensor)) return true;
 
         // ---- Tier 3: fallback (correctness, not performance) ----
